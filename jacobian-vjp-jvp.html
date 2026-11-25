@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Jacobian, JVP, and VJP</title>
+<meta name="author" content="Yidong Ling">
+<meta name="description" content="The math that backpropagation runs on, from the definition of the Jacobian to jax.grad.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;600;700&family=Merriweather:ital,wght@0,400;0,700;1,400&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+
+<style>
+  :root {
+    --bg: #f9f9f9;
+    --text: #3c3c3c;
+    --heading: #234460;
+    --rule: #5992c3;
+    --link: #376c98;
+    --code-inline: #7d12ba;
+    --code-bg: #ffffff;
+    --border: #dfe3e8;
+    --note-bg: #eef4f9;
+    --muted: #6b7480;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0 auto;
+    padding: 32px 20px 96px;
+    max-width: 1130px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: Merriweather, Georgia, serif;
+    font-size: 16.5px;
+    line-height: 1.7;
+  }
+  h1, h2, h3 {
+    font-family: "Fira Sans", "Helvetica Neue", Arial, sans-serif;
+    color: var(--heading);
+    line-height: 1.25;
+  }
+  h1 { font-size: 30px; margin: 0 0 6px; }
+  h2 {
+    font-size: 24px;
+    margin: 64px 0 18px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h3 { font-size: 19.5px; margin: 36px 0 10px; }
+  p { margin: 0 0 16px; }
+  a { color: var(--link); }
+  .subtitle {
+    font-family: "Fira Sans", "Helvetica Neue", Arial, sans-serif;
+    color: var(--muted);
+    font-size: 17px;
+    margin-bottom: 6px;
+  }
+  .byline {
+    font-family: "Fira Sans", "Helvetica Neue", Arial, sans-serif;
+    color: var(--muted);
+    font-size: 15px;
+    margin-bottom: 28px;
+  }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.88em;
+    color: var(--code-inline);
+  }
+  pre {
+    margin: 0 0 18px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--code-bg);
+    overflow-x: auto;
+  }
+  pre code, pre code.hljs {
+    display: block;
+    padding: 14px 16px;
+    font-size: 14px;
+    line-height: 1.55;
+    color: #24292e;
+    background: transparent;
+  }
+  mjx-container[display="true"] {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 0;
+    margin: 18px 0 !important;
+  }
+
+  /* ---------- layout and table of contents ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 800px);
+    gap: 48px;
+  }
+  main { min-width: 0; }
+  h2[id], h3[id] { scroll-margin-top: 20px; }
+  .toc {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    font-family: "Fira Sans", "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.35;
+  }
+  .toc-title {
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px;
+    padding-left: 8px;
+  }
+  .toc ol { list-style: none; margin: 0; padding: 0; }
+  .toc a {
+    display: block;
+    text-decoration: none;
+    color: var(--heading);
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 6px;
+  }
+  .toc a:hover { background: #e9eef3; }
+  .toc a.active {
+    background: #ffffff;
+    box-shadow: inset 0 0 0 1px var(--rule);
+  }
+  .toc code { color: inherit; }
+  .toc ol ol {
+    display: none;
+    margin: 2px 0 8px 8px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border);
+  }
+  .toc li.open > ol { display: block; }
+  .toc ol ol a {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text);
+    padding: 4px 8px;
+  }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+    .toc {
+      position: static;
+      max-height: none;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 12px;
+    }
+    .toc > ol {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 4px 12px;
+    }
+    .toc ol ol { display: block; }
+    .toc a.active { box-shadow: none; background: transparent; }
+  }
+  ol.refs { padding-left: 22px; }
+  ol.refs li { margin-bottom: 8px; }
+</style>
+
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['\\(', '\\)']],
+      displayMath: [['\\[', '\\]']],
+      macros: {
+        R: '\\mathbb{R}',
+        T: '\\top',
+        bw: ['\\textcolor[RGB]{180,84,26}{#1}', 1]
+      }
+    },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    if (window.hljs) { hljs.highlightAll(); }
+  });
+</script>
+</head>
+
+<body>
+
+<h1>The Jacobian, JVP, and VJP</h1>
+<p class="subtitle">The math that backpropagation runs on, from the definition to <code>jax.grad</code></p>
+<p class="byline">Yidong Ling · <time datetime="2026-11-16">November 16, 2026</time></p>
+
+<div class="layout">
+
+<nav class="toc" aria-label="Contents">
+  <p class="toc-title">Contents</p>
+  <ol>
+    <li>
+      <a href="#p1">1. The Jacobian matrix</a>
+      <ol>
+        <li><a href="#j-def">What does a Jacobian hold?</a></li>
+        <li><a href="#j-function">Jacobians are matrices as well as functions</a></li>
+        <li><a href="#j-ex-linear">Example 1: the linear transformation \(\mathbf{y} = \mathbf{W} \mathbf{x}\)</a></li>
+        <li><a href="#j-example">Example 2: a nonlinear function</a></li>
+      </ol>
+    </li>
+    <li>
+      <a href="#p2">2. JVP and VJP</a>
+      <ol>
+        <li><a href="#jvp">The V in JVP: a perturbation of the inputs</a></li>
+        <li><a href="#vjp">The V in VJP: a gradient arriving from downstream</a></li>
+        <li><a href="#chain">Forward-mode and reverse-mode automatic differentiation</a></li>
+      </ol>
+    </li>
+    <li>
+      <a href="#p3">3. The linear layer</a>
+      <ol>
+        <li><a href="#lin-one">A single input: \(\mathbf{y} = \mathbf{W}\mathbf{x}\)</a></li>
+        <li><a href="#lin-batch">A batch of inputs: \(\mathbf{Y} = \mathbf{X}\mathbf{W}\)</a></li>
+      </ol>
+    </li>
+    <li>
+      <a href="#p4">4. The same math in JAX</a>
+      <ol>
+        <li><a href="#jax-jacobian"><code>jax.jacobian</code>: the full Jacobian</a></li>
+        <li><a href="#jax-jvp"><code>jax.jvp</code>: the JVP</a></li>
+        <li><a href="#jax-vjp"><code>jax.vjp</code>: the VJP</a></li>
+        <li><a href="#jax-grad"><code>jax.grad</code>: a VJP with \(\mathbf{u} = 1\)</a></li>
+        <li><a href="#jax-train">A training step: <code>jax.value_and_grad</code>, <code>jax.jit</code>, <code>jax.tree.map</code></a></li>
+      </ol>
+    </li>
+    <li><a href="#refs">References</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<p>
+Backpropagation repeats one operation: multiply a row vector by a Jacobian matrix.
+That operation is the VJP.
+Its mirror image, the JVP, multiplies a Jacobian matrix by a column vector.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="p1">1. The Jacobian matrix</h2>
+
+<h3 id="j-def">What does a Jacobian hold?</h3>
+
+<p>
+Let \(f : \R^n \to \R^m\) be a function whose first-order partial derivatives all exist.
+This function takes a vector \(\mathbf{x} = (x_1, \ldots, x_n) \in \R^n\) as input
+and produces a vector \(\mathbf{y} = f(\mathbf{x}) = (y_1, \ldots, y_m) \in \R^m\) as output.
+</p>
+<p>
+The Jacobian matrix of \(f\), denoted \(\mathbf{J}_f\), is the \(m \times n\) matrix
+whose \((i, j)\) entry is \(\frac{\partial y_i}{\partial x_j}\):
+</p>
+
+\[
+\mathbf{J}_f \;=\;
+\begin{bmatrix}
+\dfrac{\partial y_1}{\partial x_1} & \cdots & \dfrac{\partial y_1}{\partial x_n} \\
+\vdots & \ddots & \vdots \\
+\dfrac{\partial y_m}{\partial x_1} & \cdots & \dfrac{\partial y_m}{\partial x_n}
+\end{bmatrix}.
+\]
+
+<p>
+Row \(i\) is the transposed gradient of the scalar \(y_i\) with respect to \(\mathbf{x}\).
+Column \(j\) is the partial derivative of the vector \(\mathbf{y}\) with respect to the scalar \(x_j\).
+</p>
+
+<h3 id="j-function">Jacobians are matrices as well as functions</h3>
+
+<p>
+Each partial derivative depends on the point where it is taken, and so does the Jacobian.
+</p>
+<p>
+At a given point \(\mathbf{x} = (x_1, \ldots, x_n)\) of the domain, the Jacobian is a concrete matrix of numbers:
+</p>
+
+\[
+\mathbf{J}_f(\mathbf{x}) \in \R^{m \times n}.
+\]
+
+<p>
+The mapping that assigns this matrix to every point of the domain is a matrix-valued function:
+</p>
+
+\[
+\mathbf{J}_f : \R^n \to \R^{m \times n},
+\qquad
+\mathbf{x} \mapsto \mathbf{J}_f(\mathbf{x}).
+\]
+
+<p>
+The scalar case \(n = m = 1\) shows the same two readings.
+For \(f(x) = x^2\), the derivative \(f'(x) = 2x\) is a function, and \(f'(3) = 6\) is a number.
+</p>
+<h3 id="j-ex-linear">Example 1: the linear transformation \(\mathbf{y} = \mathbf{W} \mathbf{x}\)</h3>
+
+<p>Let \(f\) multiply a vector \(\mathbf{x}\) by a matrix \(\mathbf{W}\):</p>
+
+\[
+f(\mathbf{x}) = \mathbf{W} \mathbf{x},
+\qquad
+\mathbf{x} = \begin{bmatrix} x_1 \\ x_2 \end{bmatrix},
+\qquad
+\mathbf{W} = \begin{bmatrix} w_{11} & w_{12} \\ w_{21} & w_{22} \end{bmatrix}.
+\]
+
+<p>Expand the matrix product into one equation per output:</p>
+
+\[
+\begin{aligned}
+y_1(x_1, x_2) &= w_{11}\, x_1 + w_{12}\, x_2 \\
+y_2(x_1, x_2) &= w_{21}\, x_1 + w_{22}\, x_2
+\end{aligned}
+\]
+
+<p>Differentiate each output with respect to each input:</p>
+
+\[
+\mathbf{J}_f(\mathbf{x}) =
+\begin{bmatrix}
+\dfrac{\partial y_1}{\partial x_1} & \dfrac{\partial y_1}{\partial x_2} \\
+\dfrac{\partial y_2}{\partial x_1} & \dfrac{\partial y_2}{\partial x_2}
+\end{bmatrix}
+=
+\begin{bmatrix} w_{11} & w_{12} \\ w_{21} & w_{22} \end{bmatrix}
+= \mathbf{W}.
+\]
+
+<p>
+No entry contains \(\mathbf{x}\), so \(\mathbf{J}_f\) is a constant function: it returns \(\mathbf{W}\) at every point.
+The same holds for a matrix \(\mathbf{W}\) of any size.
+</p>
+
+<h3 id="j-example">Example 2: a nonlinear function</h3>
+
+<p>Here is a function with \(n = 3\) inputs and \(m = 2\) outputs:</p>
+
+\[
+f(x_1, x_2, x_3) =
+\begin{bmatrix} x_1 x_2 \\ x_2 + x_3^2 \end{bmatrix}.
+\]
+
+<p>Differentiate each output with respect to each input:</p>
+
+\[
+\mathbf{J}_f(\mathbf{x}) =
+\begin{bmatrix}
+x_2 & x_1 & 0 \\
+0 & 1 & 2 x_3
+\end{bmatrix}.
+\]
+
+<p>
+The entries contain \(\mathbf{x}\), so the matrix changes from point to point.
+At \(\mathbf{x} = (2, 3, 1)\) the function returns \(f(\mathbf{x}) = (6, 4)\) and the Jacobian is
+</p>
+
+\[
+\mathbf{J} =
+\begin{bmatrix}
+3 & 2 & 0 \\
+0 & 1 & 2
+\end{bmatrix}.
+\]
+
+<!-- ================================================================== -->
+<h2 id="p2">2. JVP and VJP</h2>
+
+<p>
+Let \(\mathbf{J} \in \R^{m \times n}\) be the Jacobian of \(f\) at a point \(\mathbf{x}\).
+The Jacobian-vector product (JVP) is the product of \(\mathbf{J}\) and a vector \(\mathbf{v} \in \R^n\):
+</p>
+
+\[
+\mathbf{J} \mathbf{v} \;\in\; \R^m .
+\]
+
+<p>
+The vector-Jacobian product (VJP) is the product of a vector \(\mathbf{u} \in \R^m\) and \(\mathbf{J}\):
+</p>
+
+\[
+\mathbf{u}^\T \mathbf{J} \;\in\; \R^{1 \times n} .
+\]
+
+<h3 id="jvp">The V in JVP: a perturbation of the inputs</h3>
+
+<p>
+For an infinitesimal change \(d\mathbf{x}\) of the input, the change of the output is
+</p>
+
+\[
+d\mathbf{y} \;=\; \mathbf{J}\,d\mathbf{x} .
+\]
+
+<p>
+The JVP is therefore the change of the output \(\mathbf{y}\) caused by a small change \(\mathbf{v}\) of the input.
+For a finite \(\mathbf{v}\), the relation holds approximately:
+</p>
+
+\[
+f(\mathbf{x} + \mathbf{v}) - f(\mathbf{x}) \;\approx\; \mathbf{J} \mathbf{v} .
+\]
+
+<p>Consider Example 2 at \(\mathbf{x} = (2, 3, 1)\) with \(\mathbf{v} = (0.01, 0.01, 0.01)\):</p>
+
+\[
+\mathbf{J} \mathbf{v} =
+\begin{bmatrix} 3 & 2 & 0 \\ 0 & 1 & 2 \end{bmatrix}
+\begin{bmatrix} 0.01 \\ 0.01 \\ 0.01 \end{bmatrix}
+=
+\begin{bmatrix} 0.05 \\ 0.03 \end{bmatrix},
+\qquad
+f(\mathbf{x} + \mathbf{v}) - f(\mathbf{x}) = \begin{bmatrix} 0.0501 \\ 0.0301 \end{bmatrix}.
+\]
+
+<h3 id="vjp">The V in VJP: a gradient arriving from downstream</h3>
+
+<p>
+In deep learning, \(\mathbf{y}\) is an intermediate value, and a scalar loss \(L\) is computed from it.
+Let \(\mathbf{u}\) be the gradient of \(L\) with respect to \(\mathbf{y}\):
+</p>
+
+\[
+\mathbf{u} = \left( \frac{\partial L}{\partial y_1}, \;\ldots,\; \frac{\partial L}{\partial y_m} \right) \in \R^m .
+\]
+
+<p>Entry \(j\) of the VJP is</p>
+
+\[
+\left( \mathbf{u}^\T \mathbf{J} \right)_j
+= \sum_{i=1}^{m} \frac{\partial L}{\partial y_i}\,\frac{\partial y_i}{\partial x_j}
+= \frac{\partial L}{\partial x_j}.
+\]
+
+<p>
+The last equality is the chain rule.
+The VJP therefore maps the gradient of \(L\) with respect to \(\mathbf{y}\)
+to the gradient of \(L\) with respect to \(\mathbf{x}\).
+</p>
+
+<p>
+Consider Example 2 with \(L = y_1 y_2\).
+Then \(\mathbf{u} = (y_2, y_1) = (4, 6)\) at \(\mathbf{x} = (2, 3, 1)\), and
+</p>
+
+\[
+\mathbf{u}^\T \mathbf{J} =
+\begin{bmatrix} 4 & 6 \end{bmatrix}
+\begin{bmatrix} 3 & 2 & 0 \\ 0 & 1 & 2 \end{bmatrix}
+=
+\begin{bmatrix} 12 & 14 & 12 \end{bmatrix}.
+\]
+
+<h3 id="chain">Forward-mode and reverse-mode automatic differentiation</h3>
+
+<p>
+A neural network is a composition of functions.
+Consider three: \(\mathbf{h}_1 = f_1(\mathbf{x})\), \(\mathbf{h}_2 = f_2(\mathbf{h}_1)\), and \(L = f_3(\mathbf{h}_2)\), where \(f_3\) is the loss.
+By the chain rule, the Jacobian of the composition is the product of the Jacobians:
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{x}} \;=\; \mathbf{J}_3 \, \mathbf{J}_2 \, \mathbf{J}_1 .
+\]
+
+<p>
+Automatic differentiation evaluates this product one Jacobian at a time, with a vector as every intermediate result.
+Matrix multiplication is associative, so the evaluation may start from either end.
+</p>
+
+<p>
+<strong>Reverse mode</strong> starts from the left end.
+\(L\) is a scalar, so \(\mathbf{J}_3\) has a single row: \(\mathbf{J}_3 = \frac{\partial L}{\partial \mathbf{h}_2}\).
+The evaluation proceeds as
+</p>
+
+\[
+\mathbf{u}_2^\T = \mathbf{J}_3 = \frac{\partial L}{\partial \mathbf{h}_2},
+\qquad
+\mathbf{u}_1^\T = \mathbf{u}_2^\T \mathbf{J}_2 = \frac{\partial L}{\partial \mathbf{h}_1},
+\qquad
+\mathbf{u}_1^\T \mathbf{J}_1 = \frac{\partial L}{\partial \mathbf{x}} .
+\]
+
+<p>
+Each multiplication is a VJP.
+Each result is the gradient of \(L\) with respect to one intermediate value.
+A single pass from \(L\) back to \(\mathbf{x}\) yields the full gradient, with all \(n\) entries.
+Backpropagation is reverse-mode automatic differentiation applied to a neural network.
+</p>
+
+\[
+\begin{array}{rccccccc}
+\text{values} & \mathbf{x} & \xrightarrow{\;\;f_1\;\;} & \mathbf{h}_1 & \xrightarrow{\;\;f_2\;\;} & \mathbf{h}_2 & \xrightarrow{\;\;f_3\;\;} & L \\[10pt]
+\bw{\text{VJP}} & \bw{\mathbf{u}_1^\T \mathbf{J}_1} & \bw{\longleftarrow} & \bw{\mathbf{u}_1^\T = \mathbf{u}_2^\T \mathbf{J}_2} & \bw{\longleftarrow} & \bw{\mathbf{u}_2^\T = \mathbf{J}_3} & \bw{\longleftarrow} & \bw{1}
+\end{array}
+\]
+
+<p>
+The backward pass starts from \(\frac{\partial L}{\partial L} = 1\).
+</p>
+
+<p>
+Reverse mode has a memory cost.
+\(\mathbf{J}_2\) is evaluated at \(\mathbf{h}_1\) and \(\mathbf{J}_3\) at \(\mathbf{h}_2\),
+so the forward pass must retain these values until the backward pass uses them.
+The memory therefore grows with the depth of the network.
+</p>
+
+<p>
+<strong>Forward mode</strong> starts from the right end, with a vector \(\mathbf{v} \in \R^n\):
+</p>
+
+\[
+\mathbf{v}_1 = \mathbf{J}_1 \mathbf{v},
+\qquad
+\mathbf{v}_2 = \mathbf{J}_2 \mathbf{v}_1,
+\qquad
+\mathbf{J}_3 \mathbf{v}_2 = \frac{\partial L}{\partial \mathbf{x}}\, \mathbf{v} .
+\]
+
+<p>
+Each multiplication is a JVP.
+Each result is the change of one intermediate value caused by the input change \(\mathbf{v}\).
+The pass runs in the order of the computation and retains no intermediate values.
+Its result is a single scalar.
+For \(\mathbf{v} = (0, \ldots, 1, \ldots, 0)\) with the 1 at position \(j\), that scalar is \(\frac{\partial L}{\partial x_j}\).
+The full gradient therefore takes \(n\) passes.
+</p>
+
+<p>
+In Example 2 with \(L = y_1 y_2\), forward mode with \(\mathbf{v} = (1, 0, 0)\) gives \(\mathbf{J} \mathbf{v} = (3, 0)\)
+and then \(4 \cdot 3 + 6 \cdot 0 = 12 = \frac{\partial L}{\partial x_1}\).
+The single VJP above returned all three entries, \((12, 14, 12)\).
+</p>
+
+<p>
+A network has millions of parameters and one scalar loss.
+Reverse mode computes its gradient in one pass, so training uses reverse mode.
+</p>
+
+<p>
+Automatic-differentiation libraries compute these products without forming \(\mathbf{J}\).
+A layer with 4096 inputs and 4096 outputs has a Jacobian of 16.8 million entries for a single example.
+Each operation instead provides a function that maps \(\mathbf{u}\) directly to \(\mathbf{u}^\T \mathbf{J}\).
+</p>
+
+<!-- ================================================================== -->
+<h2 id="p3">3. The linear layer</h2>
+
+<h3 id="lin-one">A single input: \(\mathbf{y} = \mathbf{W}\mathbf{x}\)</h3>
+
+<p>
+Let \(\mathbf{W} \in \R^{m \times n}\) be the weight matrix and \(\mathbf{x} \in \R^n\) the input.
+The layer computes \(\mathbf{y} = \mathbf{W}\mathbf{x} \in \R^m\).
+Subsequent layers compute a scalar loss \(L\) from \(\mathbf{y}\).
+Backpropagation delivers \(\mathbf{u} = \frac{\partial L}{\partial \mathbf{y}}\) to the layer.
+The layer returns \(\frac{\partial L}{\partial \mathbf{x}}\) and \(\frac{\partial L}{\partial \mathbf{W}}\).
+Each is a VJP \(\mathbf{u}^\T \mathbf{J}\), with a different Jacobian \(\mathbf{J}\).
+</p>
+
+<p>
+<strong>The gradient with respect to \(\mathbf{x}\).</strong>
+The Jacobian of \(\mathbf{y}\) with respect to \(\mathbf{x}\) is \(\mathbf{J} = \mathbf{W}\), by Example 1.
+The VJP is
+</p>
+
+\[
+\mathbf{u}^\T \mathbf{J}
+\;=\; \mathbf{u}^\T \mathbf{W}
+\;=\; \left( \frac{\partial L}{\partial \mathbf{y}} \right)^{\T} \mathbf{W} .
+\]
+
+<p>
+This is \(\frac{\partial L}{\partial \mathbf{x}}\) as a row vector with \(n\) entries.
+Its transpose is the same gradient as a column vector:
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{x}} \;=\; \mathbf{W}^\T\, \frac{\partial L}{\partial \mathbf{y}} .
+\]
+
+<p>
+<strong>The gradient with respect to \(\mathbf{W}\).</strong>
+The VJP requires its input to be a vector, and \(\mathbf{W}\) is a matrix.
+The layer is therefore rewritten in the equivalent form
+</p>
+
+\[
+\mathbf{y} \;=\; \mathbf{A}\, \mathbf{w} ,
+\]
+
+<p>
+where \(\mathbf{w} \in \R^{mn}\) lists the entries of \(\mathbf{W}\) row by row, and \(\mathbf{A} \in \R^{m \times mn}\) is built from \(\mathbf{x}\).
+For \(m = 2\) and \(n = 3\):
+</p>
+
+\[
+\begin{bmatrix} y_1 \\ y_2 \end{bmatrix}
+=
+\underbrace{\left[\begin{array}{ccc|ccc}
+x_1 & x_2 & x_3 & 0 & 0 & 0 \\
+0 & 0 & 0 & x_1 & x_2 & x_3
+\end{array}\right]}_{\mathbf{A}}
+\underbrace{\begin{bmatrix} w_{11} \\ w_{12} \\ w_{13} \\ w_{21} \\ w_{22} \\ w_{23} \end{bmatrix}}_{\mathbf{w}},
+\qquad
+\mathbf{A} = \begin{bmatrix} \mathbf{x}^\T & \mathbf{0} \\ \mathbf{0} & \mathbf{x}^\T \end{bmatrix}.
+\]
+
+<p>
+This form is a matrix times the input vector \(\mathbf{w}\).
+By Example 1, the Jacobian of \(\mathbf{y}\) with respect to \(\mathbf{w}\) is \(\mathbf{J} = \mathbf{A}\).
+The VJP is
+</p>
+
+\[
+\mathbf{u}^\T \mathbf{J}
+\;=\;
+\begin{bmatrix} u_1 & u_2 \end{bmatrix}
+\begin{bmatrix} \mathbf{x}^\T & \mathbf{0} \\ \mathbf{0} & \mathbf{x}^\T \end{bmatrix}
+\;=\;
+\begin{bmatrix} u_1 \mathbf{x}^\T & u_2 \mathbf{x}^\T \end{bmatrix}.
+\]
+
+<p>
+This row vector has \(mn\) entries, in the order of \(\mathbf{w}\).
+Arranged in the shape of \(\mathbf{W}\), block \(i\) becomes row \(i\):
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{W}}
+\;=\;
+\begin{bmatrix} u_1 \mathbf{x}^\T \\ u_2 \mathbf{x}^\T \end{bmatrix}
+\;=\; \mathbf{u}\, \mathbf{x}^\T
+\;=\; \frac{\partial L}{\partial \mathbf{y}}\, \mathbf{x}^\T .
+\]
+
+<p>
+The chain rule gives the same result entry by entry.
+The weight \(w_{ij}\) appears only in \(y_i = w_{i1} x_1 + \cdots + w_{in} x_n\), where its coefficient is \(x_j\):
+</p>
+
+\[
+\frac{\partial L}{\partial w_{ij}}
+\;=\; \frac{\partial L}{\partial y_i}\, \frac{\partial y_i}{\partial w_{ij}}
+\;=\; \frac{\partial L}{\partial y_i}\, x_j .
+\]
+
+<p>
+Entry \((i, j)\) of \(\frac{\partial L}{\partial \mathbf{W}}\) is entry \(i\) of \(\frac{\partial L}{\partial \mathbf{y}}\) times entry \(j\) of \(\mathbf{x}\).
+A matrix with these entries is the outer product \(\frac{\partial L}{\partial \mathbf{y}}\, \mathbf{x}^\T\).
+</p>
+
+<h3 id="lin-batch">A batch of inputs: \(\mathbf{Y} = \mathbf{X}\mathbf{W}\)</h3>
+
+<p>
+\(\mathbf{X} \in \R^{b \times n}\) and \(\mathbf{Y} \in \R^{b \times m}\) hold one sample per row, for a batch of \(b\) samples.
+Each sample is therefore a row vector, where the single-input form used column vectors.
+Row \(i\) of \(\mathbf{Y} = \mathbf{X}\mathbf{W}\) is the single-input layer, transposed:
+</p>
+
+\[
+\mathbf{y}^{(i)\T} = \mathbf{x}^{(i)\T}\, \mathbf{W}
+\qquad\Longleftrightarrow\qquad
+\mathbf{y}^{(i)} = \mathbf{W}^\T \mathbf{x}^{(i)} .
+\]
+
+<p>
+The transposition changes the shape of the weight matrix.
+Here \(\mathbf{W} \in \R^{n \times m}\), and \(\mathbf{W}^\T\) takes the place of the single-input \(\mathbf{W}\).
+</p>
+
+<p>
+<strong>The gradient with respect to \(\mathbf{X}\).</strong>
+Row \(i\) of \(\mathbf{Y}\) depends only on row \(i\) of \(\mathbf{X}\).
+The single-input result \(\frac{\partial L}{\partial \mathbf{x}} = \mathbf{W}^\T \frac{\partial L}{\partial \mathbf{y}}\) therefore applies to each sample, with \(\mathbf{W}^\T\) in the place of \(\mathbf{W}\):
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{x}^{(i)}} = \mathbf{W}\, \frac{\partial L}{\partial \mathbf{y}^{(i)}}
+\qquad\Longleftrightarrow\qquad
+\left( \frac{\partial L}{\partial \mathbf{x}^{(i)}} \right)^{\T} = \left( \frac{\partial L}{\partial \mathbf{y}^{(i)}} \right)^{\T} \mathbf{W}^\T .
+\]
+
+<p>
+The right-hand form is row \(i\) of \(\frac{\partial L}{\partial \mathbf{X}}\), expressed through row \(i\) of \(\frac{\partial L}{\partial \mathbf{Y}}\).
+Stacking the \(b\) rows gives
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{X}} \;=\; \frac{\partial L}{\partial \mathbf{Y}}\, \mathbf{W}^\T .
+\]
+
+<p>
+<strong>The gradient with respect to \(\mathbf{W}\).</strong>
+For one sample, the single-input result \(\frac{\partial L}{\partial \mathbf{y}}\, \mathbf{x}^\T\) is the gradient with respect to \(\mathbf{W}^\T\).
+Its transpose is the gradient with respect to \(\mathbf{W}\).
+All \(b\) samples share \(\mathbf{W}\), so their gradients add:
+</p>
+
+\[
+\frac{\partial L}{\partial \mathbf{W}}
+\;=\; \sum_{i=1}^{b} \mathbf{x}^{(i)} \left( \frac{\partial L}{\partial \mathbf{y}^{(i)}} \right)^{\T}
+\;=\; \mathbf{X}^\T\, \frac{\partial L}{\partial \mathbf{Y}} .
+\]
+
+<p>
+Backpropagation code names the three gradients <code>dX</code>, <code>dW</code>, and <code>dY</code>,
+which gives the familiar forms <code>dX = dY @ W.T</code> and <code>dW = X.T @ dY</code>.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="p4">4. The same math in JAX</h2>
+
+<h3 id="jax-jacobian"><code>jax.jacobian</code>: the full Jacobian</h3>
+
+<pre><code class="language-python">import jax
+import jax.numpy as jnp
+
+def f(x):
+    return jnp.array([x[0] * x[1], x[1] + x[2] ** 2])
+
+x = jnp.array([2.0, 3.0, 1.0])
+
+print(f(x))                 # [6. 4.]
+print(jax.jacobian(f)(x))   # [[3. 2. 0.]
+                            #  [0. 1. 2.]]
+</code></pre>
+
+<p>
+<code>jax.jacobian</code> builds the full matrix of Example 2.
+</p>
+
+<h3 id="jax-jvp"><code>jax.jvp</code>: the JVP</h3>
+
+<pre><code class="language-python">v = jnp.array([1.0, 1.0, 1.0])
+
+y, Jv = jax.jvp(f, (x,), (v,))
+print(y, Jv)                    # [6. 4.] [5. 3.]
+
+print(f(x + 0.01 * v) - f(x))   # [0.05009985 0.03009987], close to 0.01 * Jv
+</code></pre>
+
+<p>
+<code>jax.jvp</code> takes the function, a tuple of inputs, and a tuple of vectors \(\mathbf{v}\).
+It returns \(f(\mathbf{x})\) and \(\mathbf{J} \mathbf{v}\) from a single forward pass.
+</p>
+
+<h3 id="jax-vjp"><code>jax.vjp</code>: the VJP</h3>
+
+<pre><code class="language-python">y, vjp_fn = jax.vjp(f, x)
+
+u = jnp.array([4.0, 6.0])       # dL/dy for L = y1 * y2
+(uJ,) = vjp_fn(u)
+print(uJ)     # [12. 14. 12.]   dL/dx
+</code></pre>
+
+<p>
+<code>jax.vjp(f, x)</code> runs the forward pass and returns <code>vjp_fn</code>, which holds the stored intermediate values.
+<code>vjp_fn</code> is the backward pass: it takes \(\mathbf{u}\) and returns a tuple with one gradient per input of <code>f</code>.
+</p>
+
+<p>The same call reproduces the two formulas of the batched linear layer:</p>
+
+<pre><code class="language-python">X  = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+W  = jnp.array([[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]])
+dY = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+
+def linear(X, W):
+    return X @ W
+
+Y, vjp_fn = jax.vjp(linear, X, W)
+dX, dW = vjp_fn(dY)
+
+print(jnp.allclose(dX, dY @ W.T))   # True
+print(jnp.allclose(dW, X.T @ dY))   # True
+</code></pre>
+
+<h3 id="jax-grad"><code>jax.grad</code>: a VJP with \(\mathbf{u} = 1\)</h3>
+
+<p>
+A scalar-valued function has a Jacobian with one row, and \(\mathbf{u}\) is a single number.
+With \(\mathbf{u} = 1\), the VJP returns that row, which is the gradient.
+<code>jax.grad</code> computes exactly this:
+</p>
+
+<pre><code class="language-python">def loss(x):
+    y = f(x)
+    return y[0] * y[1]
+
+print(jax.grad(loss)(x))    # [12. 14. 12.]
+
+def my_grad(fun):
+    def grad_fun(x):
+        y, vjp_fn = jax.vjp(fun, x)   # forward pass
+        (g,) = vjp_fn(1.0)            # backward pass, seeded with dL/dL = 1
+        return g
+    return grad_fun
+
+print(my_grad(loss)(x))     # [12. 14. 12.]
+</code></pre>
+
+<h3 id="jax-train">A training step: <code>jax.value_and_grad</code>, <code>jax.jit</code>, <code>jax.tree.map</code></h3>
+
+<p>
+A training step computes the loss, computes the gradient of the loss with respect to every parameter, and updates the parameters.
+The example is a two-layer network with the parameters stored in a dictionary:
+</p>
+
+<pre><code class="language-python">def loss_fn(params, X, T):
+    H = jax.nn.relu(X @ params["W1"])
+    Y = H @ params["W2"]
+    return 0.5 * jnp.sum((Y - T) ** 2) / X.shape[0]
+
+@jax.jit
+def train_step(params, X, T):
+    loss, grads = jax.value_and_grad(loss_fn)(params, X, T)
+    params = jax.tree.map(lambda p, g: p - 0.1 * g, params, grads)
+    return params, loss
+
+k1, k2, k3, k4 = jax.random.split(jax.random.key(0), 4)
+params = {"W1": 0.5 * jax.random.normal(k1, (3, 5)),
+          "W2": 0.5 * jax.random.normal(k2, (5, 2))}
+X = jax.random.normal(k3, (4, 3))
+T = jax.random.normal(k4, (4, 2))
+
+for step in range(4):
+    params, loss = train_step(params, X, T)
+    print(step, loss)
+# 0 5.164279
+# 1 2.6129582
+# 2 2.045497
+# 3 1.7406061
+</code></pre>
+
+<p>Three functions carry the step:</p>
+
+<ul>
+  <li><code>jax.value_and_grad(loss_fn)</code> returns the loss and its gradient from one forward and one backward pass. It differentiates with respect to the first argument, <code>params</code>.</li>
+  <li><code>jax.tree.map</code> applies a function to every array of a nested container. Here it applies the update \(\mathbf{W} \leftarrow \mathbf{W} - 0.1\, \frac{\partial L}{\partial \mathbf{W}}\) to each weight matrix.</li>
+  <li><code>jax.jit</code> compiles the whole step, forward pass, backward pass, and update, into one optimized function.</li>
+</ul>
+
+<p>
+<code>grads</code> has the structure of <code>params</code>, and each gradient has the shape of its weight matrix:
+</p>
+
+<pre><code class="language-python">grads = jax.grad(loss_fn)(params, X, T)
+print({name: g.shape for name, g in grads.items()})   # {'W1': (3, 5), 'W2': (5, 2)}
+</code></pre>
+
+<p>
+The backward pass inside <code>jax.value_and_grad</code> starts from \(\mathbf{u} = 1\) at the loss and applies one VJP per operation.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="refs">References</h2>
+
+<p>Part 1 follows the structure of Yi Wang's article [1].</p>
+
+<ol class="refs">
+  <li>Yi Wang, <a href="https://wangkuiyi.github.io/jacobian.html">Automatic Differentiation (Part 1): The Jacobian for JVP and VJP</a>.</li>
+  <li>Maxime Robeyns, <a href="https://maximerobeyns.com/of_vjps_and_jvps">Of VJPs and JVPs</a>.</li>
+  <li>Jingnan Shi, <a href="https://jingnanshi.com/blog/autodiff.html">Automatic Differentiation: Forward and Reverse</a>.</li>
+  <li>JAX documentation, <a href="https://docs.jax.dev/en/latest/301/cookbook.html">The Autodiff Cookbook</a>.</li>
+  <li>JAX documentation, <a href="https://docs.jax.dev/en/latest/the-training-cookbook.html">The Training Cookbook</a>.</li>
+</ol>
+
+</main>
+</div>
+
+<script>
+  /* Table of contents: mark the section in view and expand its part. */
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+    var targets = links.map(function (a) {
+      return document.getElementById(a.getAttribute('href').slice(1));
+    });
+    var ticking = false;
+
+    function update() {
+      ticking = false;
+      var current = -1;
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i].getBoundingClientRect().top <= 120) { current = i; } else { break; }
+      }
+      links.forEach(function (a) { a.classList.remove('active'); });
+      document.querySelectorAll('.toc li.open').forEach(function (li) { li.classList.remove('open'); });
+      if (current < 0) { return; }
+      var link = links[current];
+      link.classList.add('active');
+      var part = link.parentElement;
+      while (part.parentElement.parentElement.tagName !== 'NAV') { part = part.parentElement; }
+      part.classList.add('open');
+    }
+
+    function onScroll() {
+      if (!ticking) { ticking = true; requestAnimationFrame(update); }
+    }
+    /* Scroll in script so the links also work where the page is shown as a snapshot. */
+    links.forEach(function (a, i) {
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        targets[i].scrollIntoView();
+        try { history.replaceState(null, '', a.getAttribute('href')); } catch (err) {}
+      });
+    });
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    update();
+  })();
+</script>
+
+</body>
+</html>
