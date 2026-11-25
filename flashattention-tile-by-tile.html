@@ -1,8 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FlashAttention, Tile by Tile</title>
 <meta name="description" content="An illustrated tutorial on the FlashAttention paper: GPU memory hierarchy, online softmax, the tiled forward and backward passes, IO complexity and results.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=JetBrains+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400&display=swap">
+<link rel="stylesheet" href="assets/docs.css">
 <script>
 window.MathJax = {
   tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']] },
@@ -11,6 +14,354 @@ window.MathJax = {
 };
 </script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<style>
+/* ---------- page palette: HBM is blue, SRAM is orange ---------- */
+:root {
+  --card: var(--bg);
+  --hbm: #2f5f9e;
+  --hbm-soft: #dce7f5;
+  --hbm-mid: #93b2da;
+  --on-hbm: #ffffff;
+  --sram: #b76a00;
+  --sram-fill: #f2a32b;
+  --sram-soft: #fcefd8;
+  --on-sram: #2a1a00;
+  --good: #2f7a4f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --hbm: #8db1e0;
+    --hbm-soft: #1d2b41;
+    --hbm-mid: #3f5a82;
+    --on-hbm: #0e1622;
+    --sram: #f2b23e;
+    --sram-fill: #e39c27;
+    --sram-soft: #3a2b12;
+    --on-sram: #1e1300;
+    --good: #6cc593;
+  }
+}
+
+/* ---------- collapsible subsections in Contents ---------- */
+.toc li.has-sub { position: relative; }
+.toc li.has-sub > a { padding-right: 28px; }
+.toc-tog {
+  position: absolute; top: 3px; right: 0; width: 24px; height: 24px;
+  border: 0; border-radius: 4px; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 0; display: grid; place-items: center;
+}
+.toc-tog:hover { background: var(--hover-bg); color: var(--link); }
+.toc-tog::before {
+  content: ""; width: 6px; height: 6px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s ease;
+}
+.toc li.open > .toc-tog::before { transform: rotate(45deg); }
+@media (max-width: 880px) { .toc-tog { display: none; } .toc li.has-sub > a { padding-right: 0; } }
+@media (prefers-reduced-motion: reduce) { .toc-tog::before { transition: none; } }
+:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 3px; }
+
+
+main ul, main ol { padding-left: 1.3em; margin: 0 0 16px; }
+main li { margin-bottom: 6px; }
+main li::marker { color: var(--muted); }
+strong { font-weight: 650; }
+.mem {
+  font-family: var(--mono);
+  font-size: .74em;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: .12em .45em;
+  border-radius: 999px;
+  white-space: nowrap;
+  vertical-align: .08em;
+}
+.mem.hbm { background: var(--hbm); color: var(--on-hbm); }
+.mem.sram { background: var(--sram-fill); color: var(--on-sram); }
+
+.eq {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 0;
+  margin: 8px 0 18px;
+}
+.eq.boxed {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 18px;
+}
+
+.callout {
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin: 8px 0 22px;
+  font-size: 1rem;
+}
+.callout > :last-child { margin-bottom: 0; }
+.callout .label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.callout.key { background: var(--sram-soft); }
+.callout.key .label { color: var(--sram); }
+.callout.later { background: var(--surface); }
+.callout.later .label { color: var(--muted); }
+
+.tldr {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+  margin: 8px 0 20px;
+}
+.tldr div {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  font-size: .98rem;
+  line-height: 1.55;
+}
+.tldr b {
+  display: block;
+  font-family: var(--sans);
+  font-size: 1rem;
+  margin-bottom: 4px;
+}
+
+/* ---------- figures ---------- */
+figure {
+  margin: 20px 0 28px;
+  max-width: 920px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+figure .scroll { overflow-x: auto; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption {
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: 14px;
+  max-width: 78ch;
+}
+figcaption b { color: var(--muted); font-weight: 650; }
+.fig-title { font-family: var(--sans); font-weight: 700; font-size: 15px; margin: 0 0 12px; color: var(--text); }
+
+svg text { font-family: var(--sans); }
+.s-lane { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; fill: var(--muted); }
+.s-band-sram { fill: var(--sram-soft); }
+.s-band-hbm { fill: var(--hbm-soft); }
+.s-kbox { fill: var(--card); stroke: var(--muted); stroke-width: 1.2; }
+.s-kfused { fill: var(--card); stroke: var(--sram); stroke-width: 2; }
+.s-small { font-size: 10.5px; fill: var(--muted); }
+.s-k { font-size: 13px; fill: var(--text); font-weight: 600; }
+.s-tn { fill: var(--hbm-mid); }
+.s-tnn { fill: var(--hbm); }
+.s-on-hbm { fill: var(--on-hbm); font-weight: 700; font-size: 13px; }
+.s-on-hbm-sm { fill: var(--on-hbm); font-size: 10px; }
+.s-lbl { font-size: 12px; fill: var(--muted); font-family: var(--mono); }
+.s-arrow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.s-arrow-big { stroke: var(--hbm); stroke-width: 3.5; fill: none; }
+.s-head { fill: var(--muted); }
+.s-head-big { fill: var(--hbm); }
+.s-note { font-size: 13px; fill: var(--muted); font-style: italic; font-family: var(--sans); }
+.s-mini { fill: var(--surface); }
+.s-mini.hot { fill: var(--sram-fill); }
+
+.pyr-sram { fill: var(--sram-fill); }
+.pyr-hbm { fill: var(--hbm); }
+.pyr-dram { fill: var(--surface); stroke: var(--border); }
+.pyr-gap { stroke: var(--card); stroke-width: 3; fill: none; }
+.pyr-t1 { fill: var(--on-sram); font-weight: 700; font-size: 13px; }
+.pyr-t2 { fill: var(--on-hbm); font-weight: 700; font-size: 14px; }
+.pyr-t3 { fill: var(--text); font-weight: 700; font-size: 14px; }
+.pyr-big { fill: var(--text); font-weight: 700; font-size: 15px; }
+.pyr-sub { fill: var(--muted); font-size: 12.5px; }
+.pyr-lead { stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 3 3; }
+
+/* ---------- pseudocode & code ---------- */
+.algo {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 0;
+  overflow-x: auto;
+  max-width: 920px;
+  margin: 12px 0 24px;
+}
+.algo .ln { display: block; padding: 0 20px 0 0; white-space: pre; }
+.algo .ln::before {
+  content: attr(data-n);
+  display: inline-block;
+  width: 44px;
+  padding-right: 14px;
+  text-align: right;
+  color: var(--muted);
+}
+.algo .cm { color: var(--muted); }
+.algo .kw { color: var(--hbm); font-weight: 600; }
+.algo .hl-hbm { background: var(--hbm-soft); }
+.algo .hl-sram { background: var(--sram-soft); }
+.algo-head { font-family: var(--sans); font-size: 14px; padding: 0 20px 10px 58px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 10px; white-space: normal; }
+
+.codebox { position: relative; max-width: 920px; margin: 12px 0 24px; }
+.codebox pre {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.codebox .c { color: var(--muted); font-style: italic; }
+.codebox .k { color: var(--hbm); font-weight: 600; }
+.codebox .s { color: var(--sram); }
+.copy {
+  position: absolute; top: 10px; right: 10px;
+  font-family: var(--sans); font-size: 12.5px;
+  background: var(--card); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 10px; cursor: pointer;
+}
+.copy:hover { color: var(--text); }
+
+/* ---------- tables ---------- */
+.tablewrap { overflow-x: auto; margin: 12px 0 24px; max-width: 920px; }
+table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-weight: 650; color: var(--muted); font-size: 13px; background: var(--surface); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td code { font-size: .86em; }
+
+/* ---------- controls ---------- */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; font-family: var(--sans); font-size: 14px; }
+.btn {
+  font-family: var(--sans); font-size: 14px; font-weight: 600;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--border); border-radius: 7px;
+  padding: 6px 12px; cursor: pointer;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.btn:disabled { opacity: .45; cursor: default; }
+select, input[type="range"] { font-family: var(--sans); font-size: 14px; accent-color: var(--hbm); }
+select { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
+label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+
+/* ---------- stepper ---------- */
+.stepper { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+@media (max-width: 760px) { .stepper { grid-template-columns: 1fr; } }
+.st-panel { font-family: var(--sans); font-size: 14.5px; }
+.st-title { font-weight: 700; font-size: 16px; margin: 0 0 6px; }
+.st-desc { color: var(--muted); margin: 0 0 12px; line-height: 1.5; min-height: 4.5em; font-family: var(--sans); font-size: 15.5px; }
+.st-code { font-family: var(--mono); font-size: 12.5px; line-height: 1.75; background: var(--bg); border-radius: 8px; padding: 8px 0; margin-bottom: 12px; overflow-x: auto; }
+.st-code div { padding: 0 12px; white-space: pre; color: var(--muted); }
+.st-code div.on { background: var(--sram-soft); color: var(--text); }
+.st-counters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.st-counters div { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.st-counters b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+.st-counters span { font-size: 12px; color: var(--muted); line-height: 1.3; display: block; }
+.t-hbm { fill: var(--hbm-soft); stroke: var(--hbm); stroke-width: 1; }
+.t-sram { fill: var(--sram-fill); stroke: var(--sram); stroke-width: 2; }
+.t-future { fill: var(--surface); stroke: var(--border); stroke-width: 1; }
+.t-done { fill: var(--card); stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+.t-cur { fill: var(--sram-fill); stroke: var(--sram); stroke-width: 2.5; }
+.t-oprog { fill: var(--hbm-mid); }
+.dc-acc { fill: var(--hbm-mid); stroke: var(--hbm); stroke-width: 1; }
+.t-oactive { fill: none; stroke: var(--sram); stroke-width: 3; }
+.t-txt { font-family: var(--mono); font-size: 12px; fill: var(--text); pointer-events: none; }
+.t-txt.on { fill: var(--on-sram); font-weight: 600; }
+.t-txt.faint { fill: var(--muted); }
+.t-axis { font-family: var(--mono); font-size: 13px; fill: var(--muted); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-family: var(--sans); font-size: 13px; color: var(--muted); margin-top: 10px; }
+.legend i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; }
+.lg-sram { background: var(--sram-fill); }
+.lg-hbm { background: var(--hbm-soft); box-shadow: inset 0 0 0 1px var(--hbm); }
+.lg-done { background: var(--card); box-shadow: inset 0 0 0 1px var(--muted); }
+.lg-future { background: var(--surface); }
+.lg-oprog { background: var(--hbm-mid); }
+
+/* ---------- IO calculator ---------- */
+.calc { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 24px; }
+@media (max-width: 760px) { .calc { grid-template-columns: 1fr; } }
+.field { display: grid; gap: 4px; margin-bottom: 14px; font-family: var(--sans); font-size: 14px; }
+.field label { display: flex; justify-content: space-between; color: var(--muted); }
+.field output { font-family: var(--mono); color: var(--text); font-weight: 600; }
+.field input[type="range"] { width: 100%; }
+.derived { font-family: var(--mono); font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.bars { display: grid; gap: 12px; font-family: var(--sans); }
+.bar-row { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 13.5px; }
+.bar-track { position: relative; height: 26px; }
+.bar {
+  height: 100%; border-radius: 0 4px 4px 0; min-width: 2px;
+  transition: width .25s ease;
+}
+.bar.std { background: var(--hbm); }
+.bar.fa { background: var(--sram-fill); }
+.bar-val { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; margin-left: 8px; }
+.bar-line { display: flex; align-items: center; height: 100%; }
+.big-ratio { font-family: var(--sans); font-weight: 800; font-size: 2.4rem; line-height: 1; color: var(--text); }
+.big-ratio-sub { font-family: var(--sans); font-size: 13.5px; color: var(--muted); margin-top: 4px; }
+
+/* ---------- block-sparse ---------- */
+.bs-wrap { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+.bs-grid { display: grid; grid-template-columns: repeat(8, 30px); gap: 4px; }
+.bs-grid button {
+  width: 30px; height: 30px; border-radius: 4px; border: 1px solid var(--border);
+  background: var(--surface); cursor: pointer; padding: 0;
+}
+.bs-grid button[aria-pressed="true"] { background: var(--sram-fill); border-color: var(--sram); }
+.bs-info { font-family: var(--sans); font-size: 14.5px; flex: 1 1 240px; min-width: 0; }
+.bs-info .big-ratio { font-size: 2rem; }
+
+/* ---------- results ---------- */
+.mult { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
+.mult h4 { font-family: var(--sans); font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+.mult h4 span { font-weight: 400; color: var(--muted); }
+.mult .bar-track { height: 22px; margin-bottom: 6px; }
+.mult .bar-line { cursor: default; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 24px; max-width: 920px; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; font-family: var(--sans); }
+.stat b { display: block; font-size: 1.6rem; font-weight: 800; line-height: 1.1; }
+.stat span { font-size: 13.5px; color: var(--muted); line-height: 1.4; display: block; margin-top: 4px; }
+
+main > footer { border-top: 1px solid var(--border); padding-top: 20px; font-family: var(--sans); font-size: 13.5px; color: var(--muted); max-width: 920px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bar { transition: none; }
+  html { scroll-behavior: auto; }
+}
+</style>
+<!--
+  ORIGINAL STYLE BACKUP (before the switch to the shared assets/docs.css theme, 2026-11-25).
+  Fonts: Archivo (headings), Source Serif 4 (body), JetBrains Mono (code).
+  Palette: slate-blue HBM (#35537A) and amber SRAM (#A86300 / #F2A32B) on a #F2F4F7 page.
+
+  To revert: replace the <link rel="stylesheet" href="assets/docs.css"> line and the current
+  <style> block with the fonts and <style> below. Then restore the original page shell:
+  <body><div class="page"> + the masthead below + <div class="layout"> + nav.toc + <main>,
+  with each section headed by <div class="sec-num">§N</div><h2>Title</h2>.
+  The complete original file is also in git: git show 8c78f5b:flashattention-tile-by-tile.html
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=JetBrains+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400&display=swap">
+
 <style>
 :root {
   --bg: #F2F4F7;
@@ -522,8 +873,6 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; font-family: var(
 html { scroll-behavior: smooth; }
 </style>
 
-<div class="page">
-
 <header class="masthead">
   <div>
     <div class="eyebrow">Paper walkthrough · Dao, Fu, Ermon, Rudra &amp; Ré · NeurIPS 2022</div>
@@ -535,22 +884,52 @@ html { scroll-behavior: smooth; }
     <g id="motif-cells"></g>
   </svg>
 </header>
+-->
+</head>
 
-<div class="layout">
+<body>
+
+<header class="topbar">
+  <a class="brand" href="./">Yidong Ling · Notes</a>
+  <span class="spacer"></span>
+  <a class="icon-link" href="https://github.com/yidong-l/yidong-l.github.io" aria-label="Source on GitHub" title="Source on GitHub">
+    <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</header>
+
+<div class="page">
+
+<nav class="sidebar" aria-label="Site">
+  <ul>
+    <li><a href="./">Home</a></li>
+  </ul>
+  <p class="sidebar-caption">Notes</p>
+  <ul>
+    <li><a href="flashattention-tile-by-tile.html" aria-current="page">FlashAttention, Tile by Tile</a></li>
+    <li><a href="jacobian-vjp-jvp.html">The Jacobian, JVP, and VJP</a></li>
+  </ul>
+</nav>
+
+<div class="page-title">
+<p class="breadcrumb"><a href="./">Home</a><span>›</span>FlashAttention, Tile by Tile</p>
+<h1>FlashAttention, Tile by Tile</h1>
+<p class="subtitle">How FlashAttention speeds up exact attention and cuts its memory from quadratic to linear in sequence length. It does not do less math. It moves less data.</p>
+<p class="byline">Paper walkthrough · Dao, Fu, Ermon, Rudra &amp; Ré · NeurIPS 2022 · <a href="https://arxiv.org/abs/2205.14135">arXiv:2205.14135</a></p>
+</div>
 
 <nav class="toc" aria-label="Contents">
-  <h2>Contents</h2>
+  <p class="toc-title">Contents</p>
   <ol>
-    <li><a href="#idea">Overview</a></li>
-    <li><a href="#recap">Attention</a></li>
-    <li><a href="#gpu">The GPU memory hierarchy</a>
+    <li><a href="#idea">1. Overview</a></li>
+    <li><a href="#recap">2. Attention</a></li>
+    <li><a href="#gpu">3. The GPU memory hierarchy</a>
       <ol class="sub">
         <li><a href="#kernels">Streaming multiprocessors, HBM and kernels</a></li>
         <li><a href="#bound">Compute-bound vs. memory-bound</a></li>
       </ol>
     </li>
-    <li><a href="#standard">Standard attention is bound by memory traffic</a></li>
-    <li><a href="#softmax">The mathematics of tiled attention</a>
+    <li><a href="#standard">4. Standard attention is bound by memory traffic</a></li>
+    <li><a href="#softmax">5. The mathematics of tiled attention</a>
       <ol class="sub">
         <li><a href="#fact1">Fact 1. Online softmax</a></li>
         <li><a href="#fact2">Fact 2. Block matmul and tiling</a></li>
@@ -558,25 +937,25 @@ html { scroll-behavior: smooth; }
         <li><a href="#blocks">Attention on blocks</a></li>
       </ol>
     </li>
-    <li><a href="#forward">Algorithm 1: the tiled forward pass</a>
+    <li><a href="#forward">6. Algorithm 1: the tiled forward pass</a>
       <ol class="sub">
         <li><a href="#line12">Line 12 adds one partial sum</a></li>
       </ol>
     </li>
-    <li><a href="#code">A reference implementation</a></li>
-    <li><a href="#backward">The backward pass</a>
+    <li><a href="#code">7. A reference implementation</a></li>
+    <li><a href="#backward">8. The backward pass</a>
       <ol class="sub">
         <li><a href="#recompute">Recomputation replaces the stored P</a></li>
         <li><a href="#gradblocks">Gradients on blocks</a></li>
       </ol>
     </li>
-    <li><a href="#io">IO complexity</a>
+    <li><a href="#io">9. IO complexity</a>
       <ol class="sub">
         <li><a href="#proof">Proof sketch</a></li>
       </ol>
     </li>
-    <li><a href="#sparse">Block-sparse FlashAttention</a></li>
-    <li><a href="#results">Results</a>
+    <li><a href="#sparse">10. Block-sparse FlashAttention</a></li>
+    <li><a href="#results">11. Results</a>
       <ol class="sub">
         <li><a href="#endtoend">End-to-end training</a></li>
       </ol>
@@ -589,8 +968,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 1 ============================================================ -->
 <section id="idea">
-  <div class="sec-num">§1</div>
-  <h2>Overview</h2>
+  <h2>1. Overview</h2>
   <p>Earlier attention speedups cut floating-point operations (FLOPs) with sparse or low-rank approximations. Many of them ran no faster in wall-clock time. The authors argue that attention must be <strong>IO-aware</strong>, where IO means input/output between memory levels. On a modern graphics processing unit (GPU), attention is limited by memory reads and writes, not by arithmetic.</p>
   <div class="tldr">
     <div><b>The bottleneck</b>Standard attention writes the N×N score matrix to slow off-chip high-bandwidth memory (<span class="mem hbm">HBM</span>). It then reads the matrix back, several times. For long sequences, these HBM accesses dominate runtime and memory.</div>
@@ -603,8 +981,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 2 ============================================================ -->
 <section id="recap">
-  <div class="sec-num">§2</div>
-  <h2>Attention</h2>
+  <h2>2. Attention</h2>
   <p>For one attention head, the inputs are three matrices \(\mathbf{Q}, \mathbf{K}, \mathbf{V} \in \mathbb{R}^{N\times d}\). Here <strong>N</strong> is the sequence length and <strong>d</strong> is the head dimension. Attention is defined as:</p>
   <div class="eq boxed">
   \[
@@ -634,8 +1011,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 3 ============================================================ -->
 <section id="gpu">
-  <div class="sec-num">§3</div>
-  <h2>The GPU memory hierarchy</h2>
+  <h2>3. The GPU memory hierarchy</h2>
   <p>The paper runs on an NVIDIA A100 GPU. Its memory has two levels, and the programmer moves data between them explicitly.</p>
 
   <h3 id="kernels">Streaming multiprocessors, HBM and kernels</h3>
@@ -695,8 +1071,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 4 ============================================================ -->
 <section id="standard">
-  <div class="sec-num">§4</div>
-  <h2>Standard attention is bound by memory traffic</h2>
+  <h2>4. Standard attention is bound by memory traffic</h2>
   <p>The paper calls the textbook implementation <em>Algorithm 0</em>. Each line is a separate kernel, and each kernel round-trips through <span class="mem hbm">HBM</span>:</p>
 
   <div class="algo" role="figure" aria-label="Algorithm 0, standard attention">
@@ -801,8 +1176,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 5 ============================================================ -->
 <section id="softmax">
-  <div class="sec-num">§5</div>
-  <h2>The mathematics of tiled attention</h2>
+  <h2>5. The mathematics of tiled attention</h2>
   <p>Tiled attention rests on three facts from basic math.</p>
 
   <h3 id="fact1">Fact 1. Online softmax: statistics merge across sub-vectors</h3>
@@ -1216,8 +1590,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 6 ============================================================ -->
 <section id="forward">
-  <div class="sec-num">§6</div>
-  <h2>Algorithm 1: the tiled forward pass</h2>
+  <h2>6. Algorithm 1: the tiled forward pass</h2>
   <p>Algorithm 1 turns the §5 update into a loop over all Q blocks and K/V blocks. There are T<sub>r</sub> = ⌈N/B<sub>r</sub>⌉ Q blocks and T<sub>c</sub> = ⌈N/B<sub>c</sub>⌉ K/V blocks. The block sizes let one step's working set fit in an SRAM of size M:</p>
   <div class="eq">
   \[
@@ -1393,8 +1766,7 @@ html { scroll-behavior: smooth; }
 
 <!-- 7 ============================================================ -->
 <section id="code">
-  <div class="sec-num">§7</div>
-  <h2>A reference implementation in PyTorch</h2>
+  <h2>7. A reference implementation in PyTorch</h2>
   <p>This plain PyTorch loop implements Algorithm 1, with each slice standing in for a load into SRAM. It runs slowly, because PyTorch launches a kernel per line. In 32-bit floating point (fp32), it matches <code>softmax(QKᵀ/√d)V</code> to about 2×10<sup>−7</sup>. The test used N = 1000 and d = 64, so the blocks need not divide N evenly.</p>
   <div class="codebox">
     <button class="copy" type="button" data-target="ref-code">Copy</button>
@@ -1440,8 +1812,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
 <!-- 8 ============================================================ -->
 <section id="backward">
-  <div class="sec-num">§8</div>
-  <h2>The backward pass recomputes attention tiles</h2>
+  <h2>8. The backward pass recomputes attention tiles</h2>
   <p>Let L be the training loss, and let dX denote the gradient \(\frac{\partial L}{\partial \mathbf{X}}\) for any tensor X. Training needs dQ, dK and dV, given dO. With \(\mathbf{O} = \mathbf{PV}\) and \(\mathbf{P} = \operatorname{softmax}(\mathbf{S})\), the chain rule gives:</p>
   <div class="eq boxed">
   \[
@@ -1539,8 +1910,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
 <!-- 9 ============================================================ -->
 <section id="io">
-  <div class="sec-num">§9</div>
-  <h2>IO complexity</h2>
+  <h2>9. IO complexity</h2>
   <p>The paper's main theoretical result counts the elements moved between HBM and SRAM. It assumes an SRAM of size M, with d ≤ M ≤ Nd.</p>
   <div class="callout key">
     <span class="label">Theorem 2</span>
@@ -1596,8 +1966,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
 <!-- 10 ============================================================ -->
 <section id="sparse">
-  <div class="sec-num">§10</div>
-  <h2>Block-sparse FlashAttention</h2>
+  <h2>10. Block-sparse FlashAttention</h2>
   <p>Tiling makes sparsity cheap: <strong>the loop skips unneeded tiles</strong>. A block mask \(\tilde{\mathbf{M}} \in \{0,1\}^{N/B_r \times N/B_c}\) marks which (i, j) pairs to compute. If a fraction <em>s</em> of the tiles is nonzero, the cost is:</p>
   <div class="eq">
   \[
@@ -1619,7 +1988,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
       <div class="bs-info">
         <div class="big-ratio" id="bs-frac"></div>
         <div class="big-ratio-sub" id="bs-sub"></div>
-        <p style="font-family:var(--serif); font-size:15.5px; color:var(--ink-2); margin-top:14px" id="bs-note"></p>
+        <p style="font-size:15.5px; color:var(--muted); margin-top:14px" id="bs-note"></p>
       </div>
     </div>
     <figcaption>Rows are Q blocks Q<sub>i</sub>, and columns are K/V blocks K<sub>j</sub>, V<sub>j</sub>. Orange tiles are computed, and grey tiles are skipped.</figcaption>
@@ -1628,8 +1997,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
 <!-- 11 ============================================================ -->
 <section id="results">
-  <div class="sec-num">§11</div>
-  <h2>Results</h2>
+  <h2>11. Results</h2>
   <p>The paper's Figure 2 (left) times attention forward and backward for GPT-2 medium on an A100. The setup uses sequence length 1024, head dimension 64, 16 heads and batch 64.</p>
 
   <figure>
@@ -1658,8 +2026,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
 <!-- A ============================================================ -->
 <section id="appendix">
-  <div class="sec-num">Appendix</div>
-  <h2>The softmax gradient</h2>
+  <h2>Appendix: the softmax gradient</h2>
   <details class="appx">
     <summary>Show the derivation</summary>
 
@@ -1793,7 +2160,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 </footer>
 
 </main>
-</div>
+
 </div>
 
 <script>
@@ -1811,7 +2178,7 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
 
   /* ---------- header motif & mini grid ---------- */
   const motif = document.getElementById('motif-cells');
-  for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
+  if (motif) for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
     const cls = (i === 2 && j === 3) ? 'hot' : (j < 3 || (i < 2 && j === 3)) ? 'cold' : '';
     el('rect', { x: 2 + j * 29.5, y: 2 + i * 29.5, width: 26, height: 26, rx: 3, class: cls }, motif);
   }
@@ -2130,3 +2497,6 @@ print((flash_attention_forward(Q, K, V) - ref).abs().max())   <span class="c"># 
   });
 })();
 </script>
+
+</body>
+</html>
