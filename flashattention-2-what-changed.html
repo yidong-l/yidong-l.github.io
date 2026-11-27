@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FlashAttention-2: What Changed Since FlashAttention</title>
-<meta name="description" content="The differences between the FlashAttention and FlashAttention-2 papers: fewer non-matmul FLOPs, parallelism over sequence length, and work partitioning between warps.">
+<meta name="description" content="A walkthrough of the FlashAttention-2 paper: fewer non-matmul FLOPs, parallelism over sequence length, and work partitioning between warps.">
 <link rel="stylesheet" href="assets/docs.css">
 <script>
 window.MathJax = {
@@ -278,8 +278,8 @@ main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-t
 <div class="page-title">
 <p class="breadcrumb"><a href="./">Home</a><span>›</span>FlashAttention-2: What Changed Since FlashAttention</p>
 <h1>FlashAttention-2: What Changed Since FlashAttention</h1>
-<p class="subtitle">What FlashAttention-2 changes relative to FlashAttention, and what it keeps.</p>
-<p class="byline">Paper comparison · <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a> (Dao et al., 2022) and <a href="https://arxiv.org/abs/2307.08691">FlashAttention-2</a> (Dao, 2023)</p>
+<p class="subtitle">How FlashAttention-2 runs the same exact attention about 2× faster, by changing how the work runs once the data is on the chip.</p>
+<p class="byline">Paper walkthrough · Dao · 2023 · <a href="https://arxiv.org/abs/2307.08691v1">arXiv:2307.08691v1</a></p>
 </div>
 
 <nav class="toc" aria-label="Contents">
@@ -305,11 +305,7 @@ main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-t
 
 <main>
 
-<p>This document covers only the differences between two papers:</p>
-<ul>
-  <li><strong>FA1</strong>: Dao, Fu, Ermon, Rudra, Ré. <em>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.</em> <a href="https://arxiv.org/abs/2205.14135v2">arXiv:2205.14135v2</a></li>
-  <li><strong>FA2</strong>: Dao. <em>FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.</em> <a href="https://arxiv.org/abs/2307.08691v1">arXiv:2307.08691v1</a></li>
-</ul>
+<p>FlashAttention-2 (<strong>FA2</strong>) builds on FlashAttention (<strong>FA1</strong>). This page assumes the FA1 algorithm: tiling, online softmax, and recomputation in the backward pass. <a href="flashattention-tile-by-tile.html">FlashAttention, Tile by Tile</a> explains it. This page uses the same notation: Q blocks \(\mathbf{Q}_i\), K/V blocks \(\mathbf{K}_j\) and \(\mathbf{V}_j\), tiles \(\mathbf{S}_{ij}\), and the row statistics \(m\) and \(\ell\).</p>
 
 <!-- Summary ====================================================== -->
 <section id="summary">
@@ -328,16 +324,12 @@ main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-t
   </div>
   <p>Together these make FA2 about 2× faster than FA1 (1.7–3.0× across the benchmark settings). FA2 reaches up to 73% of theoretical peak in the forward pass and 63% in the backward pass on an A100.</p>
   <p>FA2 also adds block skipping under a causal mask, support for multi-query and grouped-query attention, and hand-tuned block sizes.</p>
-  <div class="callout later">
-    <span class="label">Notation</span>
-    <p>\(N\) is the sequence length and \(d\) the head dimension. \(\mathbf{Q}\) is cut into \(T_r\) blocks \(\mathbf{Q}_i\) of \(B_r\) rows. \(\mathbf{K}\) and \(\mathbf{V}\) are cut into \(T_c\) blocks \(\mathbf{K}_j, \mathbf{V}_j\) of \(B_c\) rows. A <em>tile</em> is the \(B_r \times B_c\) piece \(\mathbf{S}_{ij} = \mathbf{Q}_i \mathbf{K}_j^\top\). Online softmax keeps two numbers per row: the running max \(m\) and the running sum of exponentials \(\ell\).</p>
-  </div>
 </section>
 
 <!-- 1 ============================================================ -->
 <section id="onchip">
   <h2>1. The bottleneck moved on-chip</h2>
-  <p>FA1's cost model has two memory levels, HBM and on-chip <span class="mem sram">SRAM</span>, and counts the transfers between them. FA1 proved that no exact attention algorithm does asymptotically fewer HBM accesses for all SRAM sizes. FA2 does not improve that count's order of growth. Its gains come from three costs that the model leaves out:</p>
+  <p>FA1's <a href="flashattention-tile-by-tile.html#io">cost model</a> has two memory levels, HBM and on-chip <span class="mem sram">SRAM</span>, and counts the transfers between them. FA1 proved that no exact attention algorithm does asymptotically fewer HBM accesses for all SRAM sizes. FA2 does not improve that count's order of growth. Its gains come from three costs that the model leaves out:</p>
   <ul>
     <li><strong>The kind of FLOP.</strong> An A100 delivers 312 TFLOPs/s of FP16/BF16 matmul on Tensor Cores, but 19.5 TFLOPs/s of non-matmul FP32. One non-matmul FLOP therefore costs as much time as 16 matmul FLOPs.</li>
     <li><strong>Occupancy</strong>: the fraction of the GPU's compute resources in use.</li>
@@ -364,7 +356,7 @@ main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-t
 
   <div class="duo algos">
     <div class="algo" role="figure" aria-label="Loop structure of FA1's Algorithm 1">
-      <div class="algo-head"><b>FA1</b> (Algorithm 1)</div>
+      <div class="algo-head"><b>FA1</b> (<a href="flashattention-tile-by-tile.html#forward">Algorithm 1</a>)</div>
       <span class="ln" data-n="1"><span class="kw">for</span> j <span class="kw">in</span> K/V blocks:</span>
       <span class="ln" data-n="2">  load K<sub>j</sub>, V<sub>j</sub></span>
       <span class="ln" data-n="3">  <span class="kw">for</span> i <span class="kw">in</span> Q blocks:</span>
@@ -400,7 +392,7 @@ main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-t
   <h2>3. Forward pass: fewer non-matmul FLOPs per step</h2>
   <p>Each step folds one tile into the row block's state. The two papers do this differently.</p>
 
-  <p><strong>FA1, per tile:</strong></p>
+  <p><strong><a href="flashattention-tile-by-tile.html#line12">FA1, per tile</a>:</strong></p>
   <div class="eq boxed">
   \[
     \tilde m = \operatorname{rowmax}(\mathbf{S}_{ij}), \qquad
@@ -828,13 +820,13 @@ print((L - torch.logsumexp(S, dim=-<span class="s">1</span>)).abs().max())     <
   </div>
   <p>The name "split-K" comes from GEMM kernels, where K is the inner dimension that the product sums over. This is background from outside the paper. For \(\tilde{\mathbf{P}}\mathbf{V}_j\) that inner dimension is the key index.</p>
   <p><strong>Backward pass.</strong> FA2 also avoids split-K there. Some synchronization between warps remains, because of the dependencies among \(\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathbf{O}, \mathbf{dO}, \mathbf{dQ}, \mathbf{dK}, \mathbf{dV}\). The paper gives no more detail.</p>
-  <p><strong>Block sizes.</strong> FA1 derives block sizes from the SRAM size \(M\): \(B_c = \lceil M/4d \rceil\) and \(B_r = \min(\lceil M/4d \rceil, d)\). FA2's pseudo-code takes block sizes as inputs, and the implementation picks them by hand from \(\{64, 128\} \times \{64, 128\}\), depending on the head dimension and the device's shared-memory size. Larger blocks mean fewer shared-memory loads and stores, but need more registers and more shared memory. Past some size, registers spill and the kernel slows down sharply, or the blocks no longer fit and the kernel cannot run. The paper leaves auto-tuning to future work.</p>
+  <p><strong>Block sizes.</strong> FA1 <a href="flashattention-tile-by-tile.html#forward">derives block sizes</a> from the SRAM size \(M\): \(B_c = \lceil M/4d \rceil\) and \(B_r = \min(\lceil M/4d \rceil, d)\). FA2's pseudo-code takes block sizes as inputs, and the implementation picks them by hand from \(\{64, 128\} \times \{64, 128\}\), depending on the head dimension and the device's shared-memory size. Larger blocks mean fewer shared-memory loads and stores, but need more registers and more shared memory. Past some size, registers spill and the kernel slows down sharply, or the blocks no longer fit and the kernel cannot run. The paper leaves auto-tuning to future work.</p>
 </section>
 
 <!-- 6 ============================================================ -->
 <section id="backward">
   <h2>6. Backward pass: the changes in one table</h2>
-  <p>The gradient formulas are FA1's: \(\mathbf{dV} = \mathbf{P}^\top\mathbf{dO}\), \(\mathbf{dP} = \mathbf{dO}\,\mathbf{V}^\top\), \(\mathbf{dS} = \mathbf{P} \circ (\mathbf{dP} - D)\), \(\mathbf{dQ} = \mathbf{dS}\,\mathbf{K}\) and \(\mathbf{dK} = \mathbf{dS}^\top\mathbf{Q}\), with \(D = \operatorname{rowsum}(\mathbf{dO} \circ \mathbf{O})\). The paper calls the backward pass "almost the same" as FA1's.</p>
+  <p>The gradient formulas are FA1's, derived in <a href="flashattention-tile-by-tile.html#backward">The backward pass</a> of the FA1 tutorial. The paper calls the backward pass "almost the same" as FA1's.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th></th><th>FA1 (Algorithm 4)</th><th>FA2 (Algorithm 2)</th></tr></thead>
@@ -922,7 +914,7 @@ print((L - torch.logsumexp(S, dim=-<span class="s">1</span>)).abs().max())     <
     <figcaption>Rows are Q blocks and columns are K/V blocks, with square tiles.</figcaption>
   </figure>
 
-  <p>FA1's exact-attention pseudo-code applies the mask function to every tile. FA1 skips tiles only in its block-sparse variant, which is approximate. FA2 applies the same skip to the causal mask, where the result stays exact.</p>
+  <p>FA1's exact-attention pseudo-code applies the mask function to every tile. FA1 skips tiles only in its <a href="flashattention-tile-by-tile.html#sparse">block-sparse variant</a>, which is approximate. FA2 applies the same skip to the causal mask, where the result stays exact.</p>
   <p><strong>Multi-query and grouped-query attention (MQA, GQA).</strong> In these variants several query heads attend to one shared key/value head, which shrinks the KV cache at inference. FA2 indexes into the shared head instead of duplicating \(\mathbf{K}\) and \(\mathbf{V}\). In the backward pass it sums \(\mathbf{dK}\) and \(\mathbf{dV}\) over the query heads that share them.</p>
 </section>
 
