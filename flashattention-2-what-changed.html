@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashAttention-2: What Changed Since FlashAttention</title>
+<meta name="description" content="The differences between the FlashAttention and FlashAttention-2 papers: fewer non-matmul FLOPs, parallelism over sequence length, and work partitioning between warps.">
+<link rel="stylesheet" href="assets/docs.css">
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']] },
+  svg: { fontCache: 'global' },
+  options: { enableMenu: false }
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<style>
+/* ---------- page palette: HBM is blue, SRAM is orange, as on the FlashAttention page ---------- */
+:root {
+  --card: var(--bg);
+  --hbm: #2f5f9e;
+  --hbm-soft: #dce7f5;
+  --hbm-mid: #93b2da;
+  --on-hbm: #ffffff;
+  --sram: #b76a00;
+  --sram-fill: #f2a32b;
+  --sram-soft: #fcefd8;
+  --on-sram: #2a1a00;
+  /* one color per worker (thread block) or warp */
+  --wk-a: #8fb4e3;
+  --wk-b: #f2b250;
+  --wk-c: #86cfa3;
+  --wk-d: #e6a3c0;
+  --wk-e: #d8d27a;
+  --on-wk: #1b1f24;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --hbm: #8db1e0;
+    --hbm-soft: #1d2b41;
+    --hbm-mid: #3f5a82;
+    --on-hbm: #0e1622;
+    --sram: #f2b23e;
+    --sram-fill: #e39c27;
+    --sram-soft: #3a2b12;
+    --on-sram: #1e1300;
+    --wk-a: #7ea6d9;
+    --wk-b: #e3a443;
+    --wk-c: #74bd91;
+    --wk-d: #d58fae;
+    --wk-e: #c4be68;
+    --on-wk: #10141b;
+  }
+}
+
+/* ---------- collapsible subsections in Contents ---------- */
+.toc li.has-sub { position: relative; }
+.toc li.has-sub > a { padding-right: 28px; }
+.toc-tog {
+  position: absolute; top: 3px; right: 0; width: 24px; height: 24px;
+  border: 0; border-radius: 4px; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 0; display: grid; place-items: center;
+}
+.toc-tog:hover { background: var(--hover-bg); color: var(--link); }
+.toc-tog::before {
+  content: ""; width: 6px; height: 6px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s ease;
+}
+.toc li.open > .toc-tog::before { transform: rotate(45deg); }
+@media (max-width: 880px) { .toc-tog { display: none; } .toc li.has-sub > a { padding-right: 0; } }
+@media (prefers-reduced-motion: reduce) { .toc-tog::before { transition: none; } }
+:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 3px; }
+
+main ul, main ol { padding-left: 1.3em; margin: 0 0 16px; }
+main li { margin-bottom: 6px; }
+main li::marker { color: var(--muted); }
+strong { font-weight: 650; }
+.mem {
+  font-family: var(--mono);
+  font-size: .74em;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: .12em .45em;
+  border-radius: 999px;
+  white-space: nowrap;
+  vertical-align: .08em;
+}
+.mem.hbm { background: var(--hbm); color: var(--on-hbm); }
+.mem.sram { background: var(--sram-fill); color: var(--on-sram); }
+
+.eq {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 0;
+  margin: 8px 0 18px;
+}
+.eq.boxed {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 18px;
+}
+.eq-note { font-size: 14px; color: var(--muted); margin: 2px 0 6px; }
+.eq-note b { color: var(--sram); font-weight: 650; }
+mjx-container .gone { fill: var(--sram); stroke: var(--sram); }
+
+.callout {
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin: 8px 0 22px;
+  font-size: 1rem;
+}
+.callout > :last-child { margin-bottom: 0; }
+.callout .label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.callout.key { background: var(--sram-soft); }
+.callout.key .label { color: var(--sram); }
+.callout.later { background: var(--surface); }
+.callout.later .label { color: var(--muted); }
+
+/* ---------- figures ---------- */
+figure {
+  margin: 20px 0 28px;
+  max-width: 920px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+figure svg { display: block; width: 100%; height: auto; }
+figcaption {
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: 14px;
+  max-width: 78ch;
+}
+.fig-title { font-family: var(--sans); font-weight: 700; font-size: 15px; margin: 0 0 12px; color: var(--text); }
+svg text { font-family: var(--sans); }
+.s-arrow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.s-head { fill: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-family: var(--sans); font-size: 13px; color: var(--muted); margin-top: 10px; }
+.legend i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; }
+
+/* ---------- pseudocode & code ---------- */
+.algo {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 0;
+  overflow-x: auto;
+  max-width: 920px;
+  margin: 12px 0 24px;
+}
+.algo .ln { display: block; padding: 0 20px 0 0; white-space: pre; }
+.algo .ln::before {
+  content: attr(data-n);
+  display: inline-block;
+  width: 44px;
+  padding-right: 14px;
+  text-align: right;
+  color: var(--muted);
+}
+.algo .cm { color: var(--muted); }
+.algo .kw { color: var(--hbm); font-weight: 600; }
+.algo .hl-hbm { background: var(--hbm-soft); }
+.algo .hl-sram { background: var(--sram-soft); }
+.algo-head { font-family: var(--sans); font-size: 14px; padding: 0 20px 10px 58px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 10px; white-space: normal; }
+
+.codebox { position: relative; max-width: 920px; margin: 12px 0 24px; }
+.codebox pre {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.codebox .c { color: var(--muted); font-style: italic; }
+.codebox .k { color: var(--hbm); font-weight: 600; }
+.codebox .s { color: var(--sram); }
+.copy {
+  position: absolute; top: 10px; right: 10px;
+  font-family: var(--sans); font-size: 12.5px;
+  background: var(--card); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 10px; cursor: pointer;
+}
+.copy:hover { color: var(--text); }
+
+/* ---------- tables ---------- */
+.tablewrap { overflow-x: auto; margin: 12px 0 24px; max-width: 920px; }
+table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-weight: 650; color: var(--muted); font-size: 13px; background: var(--surface); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.nowrap { white-space: nowrap; }
+
+/* ---------- side-by-side panels ---------- */
+.duo { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px 24px; align-items: start; }
+.duo.algos { max-width: 920px; margin: 12px 0 24px; }
+.duo .algo { margin: 0; }
+.duo-title { font-family: var(--sans); font-weight: 650; font-size: 14.5px; margin: 0 0 10px; color: var(--text); }
+.duo-note { font-family: var(--sans); font-size: 14px; line-height: 1.5; color: var(--muted); margin: 10px 0 0; }
+
+/* ---------- workers, warps and tiles ---------- */
+.wk-a { fill: var(--wk-a); }
+.wk-b { fill: var(--wk-b); }
+.wk-c { fill: var(--wk-c); }
+.wk-d { fill: var(--wk-d); }
+.wk-e { fill: var(--wk-e); }
+.wk-a, .wk-b, .wk-c, .wk-d, .wk-e { stroke: var(--card); stroke-width: 1.5; }
+.wk-all { fill: var(--surface); stroke: var(--muted); stroke-width: 1; }
+.wk-shared { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.wk-txt { font-family: var(--mono); font-size: 13px; font-weight: 600; fill: var(--on-wk); }
+.wk-txt-sm { font-family: var(--mono); font-size: 11px; font-weight: 600; fill: var(--on-wk); }
+.wk-shared-txt { font-family: var(--mono); font-size: 11px; font-weight: 600; fill: var(--text); }
+.g-axis { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+.g-lbl { font-size: 12.5px; font-weight: 600; fill: var(--text); }
+.g-note { font-size: 11.5px; fill: var(--muted); }
+.g-op { font-size: 16px; font-weight: 600; fill: var(--text); }
+
+.ct-skip { fill: var(--surface); stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 3; }
+.ct-mask { fill: var(--sram-fill); stroke: var(--sram); stroke-width: 2; }
+.ct-tri { fill: var(--on-sram); opacity: .3; }
+.ct-diag { stroke: var(--on-sram); stroke-width: 1.2; }
+.ct-full { fill: var(--hbm-soft); stroke: var(--hbm); stroke-width: 1; }
+.cm-wrap { display: flex; flex-wrap: wrap; gap: 20px 36px; align-items: center; }
+.cm-wrap svg { flex: 0 1 300px; width: 300px; max-width: 100%; }
+.cm-wrap .legend { flex: 1 1 240px; flex-direction: column; gap: 12px; margin-top: 0; font-size: 14px; line-height: 1.45; }
+.lg-skip { background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
+.lg-mask { background: var(--sram-fill); }
+.lg-full { background: var(--hbm-soft); box-shadow: inset 0 0 0 1px var(--hbm); }
+
+main > footer { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 48px; font-family: var(--sans); font-size: 13.5px; color: var(--muted); max-width: 920px; }
+</style>
+</head>
+
+<body>
+
+<header class="topbar">
+  <a class="brand" href="./">Yidong Ling · Notes</a>
+  <span class="spacer"></span>
+  <a class="icon-link" href="https://github.com/yidong-l/yidong-l.github.io" aria-label="Source on GitHub" title="Source on GitHub">
+    <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</header>
+
+<div class="page">
+
+<nav class="sidebar" aria-label="Site">
+  <ul>
+    <li><a href="./">Home</a></li>
+  </ul>
+  <p class="sidebar-caption">Notes</p>
+  <ul>
+    <li><a href="flashattention-tile-by-tile.html">FlashAttention, Tile by Tile</a></li>
+    <li><a href="flashattention-2-what-changed.html" aria-current="page">FlashAttention-2: What Changed Since FlashAttention</a></li>
+    <li><a href="jacobian-vjp-jvp.html">The Jacobian, JVP, and VJP</a></li>
+  </ul>
+</nav>
+
+<div class="page-title">
+<p class="breadcrumb"><a href="./">Home</a><span>›</span>FlashAttention-2: What Changed Since FlashAttention</p>
+<h1>FlashAttention-2: What Changed Since FlashAttention</h1>
+<p class="subtitle">What FlashAttention-2 changes relative to FlashAttention, and what it keeps.</p>
+<p class="byline">Paper comparison · <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a> (Dao et al., 2022) and <a href="https://arxiv.org/abs/2307.08691">FlashAttention-2</a> (Dao, 2023)</p>
+</div>
+
+<nav class="toc" aria-label="Contents">
+  <p class="toc-title">Contents</p>
+  <ol>
+    <li><a href="#summary">Summary</a></li>
+    <li><a href="#onchip">1. The bottleneck moved on-chip</a></li>
+    <li><a href="#loops">2. Forward pass: the loops swap</a></li>
+    <li><a href="#update">3. Forward pass: fewer non-matmul FLOPs per step</a>
+      <ol class="sub">
+        <li><a href="#code">Reference implementation</a></li>
+      </ol>
+    </li>
+    <li><a href="#parallel">4. Parallelism over sequence length</a></li>
+    <li><a href="#warps">5. Work partitioning between warps</a></li>
+    <li><a href="#backward">6. Backward pass: the changes in one table</a></li>
+    <li><a href="#causal">7. Causal masks and shared K/V heads</a></li>
+    <li><a href="#same">8. What did not change</a></li>
+    <li><a href="#results">9. Results</a></li>
+    <li><a href="#typos">10. Typos in the FA2 paper (v1)</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<p>This document covers only the differences between two papers:</p>
+<ul>
+  <li><strong>FA1</strong>: Dao, Fu, Ermon, Rudra, Ré. <em>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.</em> <a href="https://arxiv.org/abs/2205.14135v2">arXiv:2205.14135v2</a></li>
+  <li><strong>FA2</strong>: Dao. <em>FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.</em> <a href="https://arxiv.org/abs/2307.08691v1">arXiv:2307.08691v1</a></li>
+</ul>
+
+<!-- Summary ====================================================== -->
+<section id="summary">
+  <h2>Summary</h2>
+  <p>FA2 computes the same exact attention as FA1 at the same asymptotic cost: \(O(N^2 d)\) FLOPs, \(O(N)\) extra memory, and no \(N \times N\) matrix in high-bandwidth memory (<span class="mem hbm">HBM</span>). What changes is how the work runs once the data is on the chip.</p>
+  <p>FA1 removed the HBM traffic of the attention matrix. With that gone, FA1 still reached only 30–50% of the A100's theoretical peak FLOPs/s in the forward pass and 25–35% in the backward pass. Optimized matrix multiply (GEMM) reaches 80–90%. FA2 traces the gap to three causes and makes one change for each:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Cause of the gap in FA1</th><th>Change in FA2</th><th>Section of the FA2 paper</th></tr></thead>
+      <tbody>
+        <tr><td>Time goes to FLOPs that are not matrix multiplies</td><td>Restructure the online-softmax update so each step rescales less, and save one statistic per row instead of two</td><td>§3.1</td></tr>
+        <tr><td>Streaming multiprocessors (SMs) sit idle when batch × heads is small</td><td>Parallelize over sequence length as well: one thread block per block of rows (forward) or of columns (backward)</td><td>§3.2</td></tr>
+        <tr><td>Warps inside a thread block exchange partial results through shared memory</td><td>Split \(\mathbf{Q}\) across warps instead of \(\mathbf{K}\) and \(\mathbf{V}\)</td><td>§3.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Together these make FA2 about 2× faster than FA1 (1.7–3.0× across the benchmark settings). FA2 reaches up to 73% of theoretical peak in the forward pass and 63% in the backward pass on an A100.</p>
+  <p>FA2 also adds block skipping under a causal mask, support for multi-query and grouped-query attention, and hand-tuned block sizes.</p>
+  <div class="callout later">
+    <span class="label">Notation</span>
+    <p>\(N\) is the sequence length and \(d\) the head dimension. \(\mathbf{Q}\) is cut into \(T_r\) blocks \(\mathbf{Q}_i\) of \(B_r\) rows. \(\mathbf{K}\) and \(\mathbf{V}\) are cut into \(T_c\) blocks \(\mathbf{K}_j, \mathbf{V}_j\) of \(B_c\) rows. A <em>tile</em> is the \(B_r \times B_c\) piece \(\mathbf{S}_{ij} = \mathbf{Q}_i \mathbf{K}_j^\top\). Online softmax keeps two numbers per row: the running max \(m\) and the running sum of exponentials \(\ell\).</p>
+  </div>
+</section>
+
+<!-- 1 ============================================================ -->
+<section id="onchip">
+  <h2>1. The bottleneck moved on-chip</h2>
+  <p>FA1's cost model has two memory levels, HBM and on-chip <span class="mem sram">SRAM</span>, and counts the transfers between them. FA1 proved that no exact attention algorithm does asymptotically fewer HBM accesses for all SRAM sizes. FA2 does not improve that count's order of growth. Its gains come from three costs that the model leaves out:</p>
+  <ul>
+    <li><strong>The kind of FLOP.</strong> An A100 delivers 312 TFLOPs/s of FP16/BF16 matmul on Tensor Cores, but 19.5 TFLOPs/s of non-matmul FP32. One non-matmul FLOP therefore costs as much time as 16 matmul FLOPs.</li>
+    <li><strong>Occupancy</strong>: the fraction of the GPU's compute resources in use.</li>
+    <li><strong>Data movement inside one SM</strong>, between registers and shared memory.</li>
+  </ul>
+  <p>The last two need a finer execution model than FA1 used. FA1 described a kernel as many threads. FA2 names the levels between a kernel and a thread:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Unit</th><th>Made of</th><th>Runs on</th><th>How its members exchange data</th></tr></thead>
+      <tbody>
+        <tr><td class="nowrap">Kernel</td><td>thread blocks</td><td>the whole GPU</td><td>through HBM, for example with atomic adds</td></tr>
+        <tr><td class="nowrap">Thread block</td><td>warps (FA2 uses 4 or 8)</td><td>one SM (an A100 has 108)</td><td>by reading and writing shared memory, which is the SM's SRAM</td></tr>
+        <tr><td class="nowrap">Warp</td><td>32 threads</td><td>—</td><td>fast shuffle instructions; the threads cooperate on one matmul</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Sections <a href="#loops">2</a>–<a href="#update">3</a> below cover the first cost, <a href="#parallel">section 4</a> the second, and <a href="#warps">section 5</a> the third.</p>
+</section>
+
+<!-- 2 ============================================================ -->
+<section id="loops">
+  <h2>2. Forward pass: the loops swap</h2>
+  <p>FA1 loops over K/V blocks on the outside and Q blocks on the inside. FA2 loops over Q blocks on the outside and K/V blocks on the inside. FA2 credits this swap, and the parallelism it allows, to Phil Tillet's implementation of FlashAttention in Triton.</p>
+
+  <div class="duo algos">
+    <div class="algo" role="figure" aria-label="Loop structure of FA1's Algorithm 1">
+      <div class="algo-head"><b>FA1</b> (Algorithm 1)</div>
+      <span class="ln" data-n="1"><span class="kw">for</span> j <span class="kw">in</span> K/V blocks:</span>
+      <span class="ln" data-n="2">  load K<sub>j</sub>, V<sub>j</sub></span>
+      <span class="ln" data-n="3">  <span class="kw">for</span> i <span class="kw">in</span> Q blocks:</span>
+      <span class="ln hl-hbm" data-n="4">    load Q<sub>i</sub>, O<sub>i</sub>, ℓ<sub>i</sub>, m<sub>i</sub>   <span class="cm">// HBM</span></span>
+      <span class="ln" data-n="5">    update with tile S<sub>ij</sub></span>
+      <span class="ln hl-hbm" data-n="6">    write O<sub>i</sub>, ℓ<sub>i</sub>, m<sub>i</sub>      <span class="cm">// HBM</span></span>
+    </div>
+    <div class="algo" role="figure" aria-label="Loop structure of FA2's Algorithm 1">
+      <div class="algo-head"><b>FA2</b> (Algorithm 1)</div>
+      <span class="ln" data-n="1"><span class="kw">for</span> i <span class="kw">in</span> Q blocks:</span>
+      <span class="ln" data-n="2">  load Q<sub>i</sub>;  init m<sub>i</sub>, ℓ<sub>i</sub>, Õ<sub>i</sub> on-chip</span>
+      <span class="ln" data-n="3">  <span class="kw">for</span> j <span class="kw">in</span> K/V blocks:</span>
+      <span class="ln" data-n="4">    load K<sub>j</sub>, V<sub>j</sub></span>
+      <span class="ln" data-n="5">    update with tile S<sub>ij</sub></span>
+      <span class="ln hl-hbm" data-n="6">  write O<sub>i</sub>, L<sub>i</sub>          <span class="cm">// HBM, once</span></span>
+    </div>
+  </div>
+
+  <p>The swap has three consequences:</p>
+  <ol>
+    <li><strong>A row block's running state stays on-chip.</strong> The statistics \(m_i\), \(\ell_i\) and the output accumulator live in SRAM from the first tile to the last. FA1 wrote them to HBM and read them back once per K/V block.</li>
+    <li><strong>The outer iterations are independent.</strong> Softmax and \(\mathbf{O} = \mathbf{P}\mathbf{V}\) both reduce over keys within one row, so no row needs another row. <a href="#parallel">Section 4</a> uses this for parallelism.</li>
+    <li><strong>Normalization can wait until the end</strong>, because the same worker holds the state for the whole row block. <a href="#update">Section 3</a> uses this.</li>
+  </ol>
+  <div class="callout later">
+    <span class="label">HBM traffic</span>
+    <p>FA2 does not restate FA1's IO analysis, so this count is mine, read off the two pseudo-codes. Per head, FA1's forward pass moves about \(2Nd + T_c(3Nd + 4N)\) elements, and FA2's moves about \(2Nd + N + 2\,T_r Nd\). The roles swap: FA2 re-reads \(\mathbf{K}\) and \(\mathbf{V}\) once per Q block, reads \(\mathbf{Q}\) once and writes \(\mathbf{O}\) once. Both counts are (number of blocks) × \(\Theta(Nd)\), so the order of growth is unchanged when \(B_r\) is sized as FA1 sized \(B_c\). For equal block sizes FA2 moves about two-thirds as many elements, and none of the repeated traffic is a write.</p>
+  </div>
+</section>
+
+<!-- 3 ============================================================ -->
+<section id="update">
+  <h2>3. Forward pass: fewer non-matmul FLOPs per step</h2>
+  <p>Each step folds one tile into the row block's state. The two papers do this differently.</p>
+
+  <p><strong>FA1, per tile:</strong></p>
+  <div class="eq boxed">
+  \[
+    \tilde m = \operatorname{rowmax}(\mathbf{S}_{ij}), \qquad
+    \tilde{\mathbf{P}} = \exp(\mathbf{S}_{ij} - \tilde m), \qquad
+    \tilde\ell = \operatorname{rowsum}(\tilde{\mathbf{P}})
+  \]
+  \[
+    m^{\text{new}} = \max(m, \tilde m), \qquad
+    \ell^{\text{new}} = e^{m - m^{\text{new}}}\,\ell + \class{gone}{e^{\tilde m - m^{\text{new}}}}\,\tilde\ell
+  \]
+  \[
+    \mathbf{O}_i \leftarrow \class{gone}{\operatorname{diag}(\ell^{\text{new}})^{-1}}\Big(\class{gone}{\operatorname{diag}(\ell)}\,e^{m - m^{\text{new}}}\,\mathbf{O}_i + \class{gone}{e^{\tilde m - m^{\text{new}}}}\,\tilde{\mathbf{P}}\mathbf{V}_j\Big)
+  \]
+  <p class="eq-note"><b>Highlighted</b> factors do not appear in FA2's per-tile update.</p>
+  </div>
+
+  <p><strong>FA2, per tile:</strong></p>
+  <div class="eq boxed">
+  \[
+    m^{\text{new}} = \max\big(m, \operatorname{rowmax}(\mathbf{S}_{ij})\big), \qquad
+    \tilde{\mathbf{P}} = \exp(\mathbf{S}_{ij} - m^{\text{new}})
+  \]
+  \[
+    \ell \leftarrow e^{m - m^{\text{new}}}\,\ell + \operatorname{rowsum}(\tilde{\mathbf{P}}), \qquad
+    \tilde{\mathbf{O}}_i \leftarrow \operatorname{diag}\big(e^{m - m^{\text{new}}}\big)\,\tilde{\mathbf{O}}_i + \tilde{\mathbf{P}}\mathbf{V}_j
+  \]
+  </div>
+
+  <p><strong>FA2, once per row block, after the last tile:</strong></p>
+  <div class="eq boxed">
+  \[
+    \mathbf{O}_i = \operatorname{diag}(\ell)^{-1}\,\tilde{\mathbf{O}}_i, \qquad
+    L_i = m + \log \ell
+  \]
+  </div>
+
+  <p>There are three differences:</p>
+  <ol>
+    <li><strong>Normalization is deferred.</strong> FA1 keeps \(\mathbf{O}_i\) normalized after every step, so each step multiplies the old output by \(\ell\) and divides the result by \(\ell^{\text{new}}\). FA2 accumulates the un-normalized sum \(\tilde{\mathbf{O}}_i\) and divides by \(\ell\) once.</li>
+    <li><strong>The tile is exponentiated against the running max.</strong> FA1 exponentiates against the tile's own max \(\tilde m\), then corrects the new term by \(e^{\tilde m - m^{\text{new}}}\). FA2 merges the max first, so \(\tilde{\mathbf{P}}\) is already on the shared reference and the new term needs no correction. The paper's prose does not mention this change, but it shows in the pseudo-code.</li>
+    <li><strong>One statistic is saved for the backward pass.</strong> FA1 saves \(m\) and \(\ell\). FA2 saves their combination, the log-sum-exp \(L = m + \log\ell\) of the row's scores.</li>
+  </ol>
+  <p>Per row and per step, FA1 computes two correction factors and a reciprocal, then scales two length-\(d\) vectors. FA2 computes one factor and scales one length-\(d\) vector. The exponential, row max and row sum over the tile's entries remain in both.</p>
+  <p>The un-normalized state stays bounded. Every exponent \(\mathbf{S}_{ij} - m\) is at most 0, so every weight lies in \((0, 1]\) and each row's largest weight is exactly 1. Hence \(1 \le \ell \le N\).</p>
+  <p>The result is the same as FA1's. After the last tile, \(m\) is the row's global max, \(\tilde{\mathbf{O}}_i = \sum_j \exp(\mathbf{S}_{ij} - m)\,\mathbf{V}_j\) and \(\ell = \operatorname{rowsum}(\exp(\mathbf{S}_i - m))\). Their quotient is \(\operatorname{softmax}(\mathbf{S}_i)\,\mathbf{V}\).</p>
+
+  <h3 id="code">Reference implementation of the FA2 forward pass</h3>
+  <p>Each slice stands in for a load into SRAM. The listing includes the \(1/\sqrt{d}\) scaling that the paper omits.</p>
+  <div class="codebox">
+    <button class="copy" type="button" data-target="fa2-code">Copy</button>
+<pre id="fa2-code"><span class="k">import</span> torch
+
+<span class="k">def</span> flash_attention2_forward(Q, K, V, Br=<span class="s">64</span>, Bc=<span class="s">64</span>):
+    <span class="c">"""FlashAttention-2 forward pass (Algorithm 1) in plain PyTorch. Q, K, V: (N, d)."""</span>
+    N, d = Q.shape
+    scale = d ** -<span class="s">0.5</span>
+    O = torch.zeros_like(Q)                        <span class="c"># output, lives in "HBM"</span>
+    L = torch.zeros(N)                             <span class="c"># row-wise logsumexp, saved for backward</span>
+
+    <span class="k">for</span> i <span class="k">in</span> range(<span class="s">0</span>, N, Br):                      <span class="c"># outer loop: Q blocks, independent of each other</span>
+        Qi = Q[i:i+Br]                             <span class="c"># "load Q_i into SRAM"</span>
+        rows = Qi.shape[<span class="s">0</span>]
+        m = torch.full((rows,), -float(<span class="s">"inf"</span>))     <span class="c"># running row max        | these three stay</span>
+        l = torch.zeros(rows)                      <span class="c"># running row sum        | on-chip for the</span>
+        acc = torch.zeros(rows, d)                 <span class="c"># un-normalized output   | whole inner loop</span>
+
+        <span class="k">for</span> j <span class="k">in</span> range(<span class="s">0</span>, N, Bc):                  <span class="c"># inner loop: K/V blocks, sequential per row</span>
+            Kj, Vj = K[j:j+Bc], V[j:j+Bc]          <span class="c"># "load K_j, V_j into SRAM"</span>
+            S = scale * (Qi @ Kj.T)                <span class="c"># (rows, Bc) tile, never stored</span>
+            m_new = torch.maximum(m, S.max(dim=<span class="s">1</span>).values)
+            P = torch.exp(S - m_new[:, <span class="k">None</span>])      <span class="c"># exponentiate against the running max</span>
+            alpha = torch.exp(m - m_new)           <span class="c"># &lt;= 1: moves the old terms to the new max</span>
+            l = alpha * l + P.sum(dim=<span class="s">1</span>)
+            acc = alpha[:, <span class="k">None</span>] * acc + P @ Vj    <span class="c"># one row rescale, no division</span>
+            m = m_new
+
+        O[i:i+Br] = acc / l[:, <span class="k">None</span>]               <span class="c"># normalize once, write O_i once</span>
+        L[i:i+Br] = m + torch.log(l)               <span class="c"># write L_i once</span>
+    <span class="k">return</span> O, L
+
+<span class="c"># check against naive attention</span>
+torch.manual_seed(<span class="s">0</span>)
+Q, K, V = (torch.randn(<span class="s">1000</span>, <span class="s">64</span>) <span class="k">for</span> _ <span class="k">in</span> range(<span class="s">3</span>))
+S = Q @ K.T / <span class="s">8.0</span>
+O, L = flash_attention2_forward(Q, K, V)
+print((O - torch.softmax(S, dim=-<span class="s">1</span>) @ V).abs().max())   <span class="c"># O matches softmax(S) V</span>
+print((L - torch.logsumexp(S, dim=-<span class="s">1</span>)).abs().max())     <span class="c"># L is the row-wise logsumexp of S</span></pre>
+  </div>
+  <div class="callout later">
+    <span class="label">Note</span>
+    <p>This listing has not been run under PyTorch, which was not available where this document was written. It was run as written against a small pure-Python stand-in for the PyTorch calls it uses, in float64. Both printed errors were below 2e-15. It also matched an independent scalar implementation of naive attention for block sizes that do not divide \(N\). Under PyTorch's default float32, expect errors near float32 rounding instead.</p>
+  </div>
+</section>
+
+<!-- 4 ============================================================ -->
+<section id="parallel">
+  <h2>4. Parallelism over sequence length</h2>
+  <p>FA1 uses one thread block per (batch, head) pair, so a kernel launch has batch × heads thread blocks. That uses almost all of an A100's 108 SMs when the product is about 80 or more. Long sequences usually come with small batches, and then most SMs idle. In the paper's benchmark shape at \(N\) = 16k and \(d\) = 128, the batch is 1 and there are 16 heads: 16 thread blocks for 108 SMs.</p>
+  <p>FA2 adds the sequence dimension to the split:</p>
+  <ul>
+    <li><strong>Forward:</strong> one thread block per (batch, head, Q block). In the example above with \(B_r = 128\), that is about 2,000 thread blocks. They never communicate.</li>
+    <li><strong>Backward:</strong> one thread block per (batch, head, K/V block). They share one output, \(\mathbf{dQ}\).</li>
+  </ul>
+
+  <figure>
+    <div class="fig-title">Which worker computes which tile</div>
+    <div class="duo">
+      <div>
+        <p class="duo-title">Forward: one worker per Q block</p>
+        <svg viewBox="0 0 366 270" role="img" aria-label="Forward pass. A 5 by 5 grid of tiles; every tile in row i is computed by the same worker, A to E from top to bottom. Each worker writes its own O and L block.">
+        <defs><marker id="wk-fwd-h" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-head"></path></marker></defs>
+        <text x="170" y="14" text-anchor="middle" class="g-axis">K/V block j</text>
+        <text x="82" y="36" text-anchor="middle" class="g-axis">1</text>
+        <text x="126" y="36" text-anchor="middle" class="g-axis">2</text>
+        <text x="170" y="36" text-anchor="middle" class="g-axis">3</text>
+        <text x="214" y="36" text-anchor="middle" class="g-axis">4</text>
+        <text x="258" y="36" text-anchor="middle" class="g-axis">5</text>
+        <text x="14" y="158" text-anchor="middle" class="g-axis" transform="rotate(-90 14 154)">Q block i</text>
+        <text x="50" y="70" text-anchor="end" class="g-axis">1</text>
+        <text x="50" y="114" text-anchor="end" class="g-axis">2</text>
+        <text x="50" y="158" text-anchor="end" class="g-axis">3</text>
+        <text x="50" y="202" text-anchor="end" class="g-axis">4</text>
+        <text x="50" y="246" text-anchor="end" class="g-axis">5</text>
+        <text x="326" y="36" text-anchor="middle" class="g-axis">O, L</text>
+        <rect x="62" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="126" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="150" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="170" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="194" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="214" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="238" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="258" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <line x1="283" y1="66" x2="296" y2="66" class="s-arrow" marker-end="url(#wk-fwd-h)"></line>
+        <rect x="300" y="53" width="52" height="26" rx="3" class="wk-a"></rect>
+        <text x="326" y="70" text-anchor="middle" class="wk-txt-sm">O₁, L₁</text>
+        <rect x="62" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="82" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="106" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="170" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="194" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="214" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="238" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="258" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <line x1="283" y1="110" x2="296" y2="110" class="s-arrow" marker-end="url(#wk-fwd-h)"></line>
+        <rect x="300" y="97" width="52" height="26" rx="3" class="wk-b"></rect>
+        <text x="326" y="114" text-anchor="middle" class="wk-txt-sm">O₂, L₂</text>
+        <rect x="62" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="82" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="106" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="126" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="150" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="214" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="238" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="258" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <line x1="283" y1="154" x2="296" y2="154" class="s-arrow" marker-end="url(#wk-fwd-h)"></line>
+        <rect x="300" y="141" width="52" height="26" rx="3" class="wk-c"></rect>
+        <text x="326" y="158" text-anchor="middle" class="wk-txt-sm">O₃, L₃</text>
+        <rect x="62" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="82" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="106" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="126" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="150" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="170" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="194" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="258" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <line x1="283" y1="198" x2="296" y2="198" class="s-arrow" marker-end="url(#wk-fwd-h)"></line>
+        <rect x="300" y="185" width="52" height="26" rx="3" class="wk-d"></rect>
+        <text x="326" y="202" text-anchor="middle" class="wk-txt-sm">O₄, L₄</text>
+        <rect x="62" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="82" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <rect x="106" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="126" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <rect x="150" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="170" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <rect x="194" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="214" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <rect x="238" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="242" x2="296" y2="242" class="s-arrow" marker-end="url(#wk-fwd-h)"></line>
+        <rect x="300" y="229" width="52" height="26" rx="3" class="wk-e"></rect>
+        <text x="326" y="246" text-anchor="middle" class="wk-txt-sm">O₅, L₅</text>
+        </svg>
+        <p class="duo-note">A worker owns one row of tiles and writes its own O<sub>i</sub> and L<sub>i</sub>. The workers never communicate.</p>
+      </div>
+      <div>
+        <p class="duo-title">Backward: one worker per K/V block</p>
+        <svg viewBox="0 0 366 326" role="img" aria-label="Backward pass. A 5 by 5 grid of tiles; every tile in column j is computed by the same worker, A to E from left to right. Each worker writes its own dK and dV block, and all workers add into the shared dQ blocks.">
+        <defs><marker id="wk-bwd-h" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-head"></path></marker></defs>
+        <text x="170" y="14" text-anchor="middle" class="g-axis">K/V block j</text>
+        <text x="82" y="36" text-anchor="middle" class="g-axis">1</text>
+        <text x="126" y="36" text-anchor="middle" class="g-axis">2</text>
+        <text x="170" y="36" text-anchor="middle" class="g-axis">3</text>
+        <text x="214" y="36" text-anchor="middle" class="g-axis">4</text>
+        <text x="258" y="36" text-anchor="middle" class="g-axis">5</text>
+        <text x="14" y="158" text-anchor="middle" class="g-axis" transform="rotate(-90 14 154)">Q block i</text>
+        <text x="50" y="70" text-anchor="end" class="g-axis">1</text>
+        <text x="50" y="114" text-anchor="end" class="g-axis">2</text>
+        <text x="50" y="158" text-anchor="end" class="g-axis">3</text>
+        <text x="50" y="202" text-anchor="end" class="g-axis">4</text>
+        <text x="50" y="246" text-anchor="end" class="g-axis">5</text>
+        <text x="326" y="36" text-anchor="middle" class="g-axis">dQ</text>
+        <rect x="62" y="46" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="71" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="46" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="71" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="46" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="71" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="46" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="71" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="46" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="71" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="66" x2="296" y2="66" class="s-arrow" marker-end="url(#wk-bwd-h)"></line>
+        <rect x="300" y="53" width="52" height="26" rx="3" class="wk-shared"></rect>
+        <text x="326" y="70" text-anchor="middle" class="wk-shared-txt">dQ₁</text>
+        <rect x="62" y="90" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="115" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="90" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="115" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="90" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="115" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="90" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="115" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="90" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="115" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="110" x2="296" y2="110" class="s-arrow" marker-end="url(#wk-bwd-h)"></line>
+        <rect x="300" y="97" width="52" height="26" rx="3" class="wk-shared"></rect>
+        <text x="326" y="114" text-anchor="middle" class="wk-shared-txt">dQ₂</text>
+        <rect x="62" y="134" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="159" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="134" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="159" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="134" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="159" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="134" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="159" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="134" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="159" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="154" x2="296" y2="154" class="s-arrow" marker-end="url(#wk-bwd-h)"></line>
+        <rect x="300" y="141" width="52" height="26" rx="3" class="wk-shared"></rect>
+        <text x="326" y="158" text-anchor="middle" class="wk-shared-txt">dQ₃</text>
+        <rect x="62" y="178" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="203" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="178" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="203" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="178" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="203" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="178" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="203" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="178" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="203" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="198" x2="296" y2="198" class="s-arrow" marker-end="url(#wk-bwd-h)"></line>
+        <rect x="300" y="185" width="52" height="26" rx="3" class="wk-shared"></rect>
+        <text x="326" y="202" text-anchor="middle" class="wk-shared-txt">dQ₄</text>
+        <rect x="62" y="222" width="40" height="40" rx="3" class="wk-a"></rect>
+        <text x="82" y="247" text-anchor="middle" class="wk-txt">A</text>
+        <rect x="106" y="222" width="40" height="40" rx="3" class="wk-b"></rect>
+        <text x="126" y="247" text-anchor="middle" class="wk-txt">B</text>
+        <rect x="150" y="222" width="40" height="40" rx="3" class="wk-c"></rect>
+        <text x="170" y="247" text-anchor="middle" class="wk-txt">C</text>
+        <rect x="194" y="222" width="40" height="40" rx="3" class="wk-d"></rect>
+        <text x="214" y="247" text-anchor="middle" class="wk-txt">D</text>
+        <rect x="238" y="222" width="40" height="40" rx="3" class="wk-e"></rect>
+        <text x="258" y="247" text-anchor="middle" class="wk-txt">E</text>
+        <line x1="283" y1="242" x2="296" y2="242" class="s-arrow" marker-end="url(#wk-bwd-h)"></line>
+        <rect x="300" y="229" width="52" height="26" rx="3" class="wk-shared"></rect>
+        <text x="326" y="246" text-anchor="middle" class="wk-shared-txt">dQ₅</text>
+        <rect x="62" y="270" width="40" height="22" rx="3" class="wk-a"></rect>
+        <text x="82" y="285" text-anchor="middle" class="wk-txt-sm">dK₁</text>
+        <rect x="62" y="296" width="40" height="22" rx="3" class="wk-a"></rect>
+        <text x="82" y="311" text-anchor="middle" class="wk-txt-sm">dV₁</text>
+        <rect x="106" y="270" width="40" height="22" rx="3" class="wk-b"></rect>
+        <text x="126" y="285" text-anchor="middle" class="wk-txt-sm">dK₂</text>
+        <rect x="106" y="296" width="40" height="22" rx="3" class="wk-b"></rect>
+        <text x="126" y="311" text-anchor="middle" class="wk-txt-sm">dV₂</text>
+        <rect x="150" y="270" width="40" height="22" rx="3" class="wk-c"></rect>
+        <text x="170" y="285" text-anchor="middle" class="wk-txt-sm">dK₃</text>
+        <rect x="150" y="296" width="40" height="22" rx="3" class="wk-c"></rect>
+        <text x="170" y="311" text-anchor="middle" class="wk-txt-sm">dV₃</text>
+        <rect x="194" y="270" width="40" height="22" rx="3" class="wk-d"></rect>
+        <text x="214" y="285" text-anchor="middle" class="wk-txt-sm">dK₄</text>
+        <rect x="194" y="296" width="40" height="22" rx="3" class="wk-d"></rect>
+        <text x="214" y="311" text-anchor="middle" class="wk-txt-sm">dV₄</text>
+        <rect x="238" y="270" width="40" height="22" rx="3" class="wk-e"></rect>
+        <text x="258" y="285" text-anchor="middle" class="wk-txt-sm">dK₅</text>
+        <rect x="238" y="296" width="40" height="22" rx="3" class="wk-e"></rect>
+        <text x="258" y="311" text-anchor="middle" class="wk-txt-sm">dV₅</text>
+        </svg>
+        <p class="duo-note">A worker owns one column of tiles and writes its own dK<sub>j</sub> and dV<sub>j</sub>. Every worker adds into the shared dQ.</p>
+      </div>
+    </div>
+    <figcaption>Each cell is one tile S<sub>ij</sub>. The letter names the worker (thread block) that computes it.</figcaption>
+  </figure>
+
+  <p>Under a causal mask, the tiles above the diagonal drop out of both grids (<a href="#causal">section 7</a>).</p>
+  <p>The split runs along rows in one pass and along columns in the other, for these reasons:</p>
+  <ul>
+    <li><strong>Forward.</strong> A row carries running state (\(m\), \(\ell\), \(\tilde{\mathbf{O}}\)) from one K/V block to the next, so one worker must process a row's tiles in order. Different rows share nothing.</li>
+    <li><strong>Backward.</strong> There is no running state. Each tile of \(\mathbf{P}\) is recomputed exactly from the saved \(L\), so every tile is independent, and the only question is which gradient sums stay private to a worker. \(\mathbf{dK}_j\) and \(\mathbf{dV}_j\) sum over \(i\), down a column. \(\mathbf{dQ}_i\) sums over \(j\), across a row. A column worker keeps \(\mathbf{dK}_j\) and \(\mathbf{dV}_j\) on-chip and writes each once. It adds its term \(\mathbf{dS}_{ij}\mathbf{K}_j\) into \(\mathbf{dQ}_i\) in HBM with an atomic add, because every other column worker adds to the same \(\mathbf{dQ}_i\). A split by rows would leave two shared outputs instead of one.</li>
+  </ul>
+  <p>The backward loop order is the same as FA1's, with K/V blocks on the outside. FA2 runs those outer iterations concurrently.</p>
+</section>
+
+<!-- 5 ============================================================ -->
+<section id="warps">
+  <h2>5. Work partitioning between warps</h2>
+  <p>Sections <a href="#loops">2</a>–<a href="#parallel">4</a> decide which tiles a thread block computes. Inside the thread block, the 4 or 8 warps must also divide the work on each tile.</p>
+
+  <figure>
+    <div class="fig-title">One tile, four warps</div>
+    <div class="duo">
+      <div>
+        <p class="duo-title">FA1: K<sub>j</sub> and V<sub>j</sub> split across warps</p>
+        <svg viewBox="0 0 380 236" role="img" aria-label="FlashAttention: the keys of K j and the rows of V j are divided among warps w1 to w4, and Q i is read by all warps. The tile S i j is cut into four column slices. Each warp produces a partial sum for all rows, and the four partial sums are added through shared memory.">
+        <text x="124" y="26" text-anchor="middle" class="g-lbl">Kⱼᵀ</text>
+        <text x="41" y="58" text-anchor="middle" class="g-lbl">Qᵢ</text>
+        <text x="223" y="58" text-anchor="middle" class="g-lbl">Vⱼ</text>
+        <rect x="64" y="36" width="30" height="22" class="wk-a"></rect>
+        <text x="79" y="51" text-anchor="middle" class="wk-txt-sm">w1</text>
+        <rect x="94" y="36" width="30" height="22" class="wk-b"></rect>
+        <text x="109" y="51" text-anchor="middle" class="wk-txt-sm">w2</text>
+        <rect x="124" y="36" width="30" height="22" class="wk-c"></rect>
+        <text x="139" y="51" text-anchor="middle" class="wk-txt-sm">w3</text>
+        <rect x="154" y="36" width="30" height="22" class="wk-d"></rect>
+        <text x="169" y="51" text-anchor="middle" class="wk-txt-sm">w4</text>
+        <rect x="30" y="66" width="22" height="120" class="wk-all"></rect>
+        <text x="41" y="130" text-anchor="middle" class="g-note" transform="rotate(-90 41 126)">all warps</text>
+        <rect x="64" y="66" width="30" height="120" class="wk-a"></rect>
+        <text x="79" y="130" text-anchor="middle" class="wk-txt">w1</text>
+        <rect x="94" y="66" width="30" height="120" class="wk-b"></rect>
+        <text x="109" y="130" text-anchor="middle" class="wk-txt">w2</text>
+        <rect x="124" y="66" width="30" height="120" class="wk-c"></rect>
+        <text x="139" y="130" text-anchor="middle" class="wk-txt">w3</text>
+        <rect x="154" y="66" width="30" height="120" class="wk-d"></rect>
+        <text x="169" y="130" text-anchor="middle" class="wk-txt">w4</text>
+        <rect x="212" y="66" width="22" height="30" class="wk-a"></rect>
+        <text x="223" y="85" text-anchor="middle" class="wk-txt-sm">w1</text>
+        <rect x="212" y="96" width="22" height="30" class="wk-b"></rect>
+        <text x="223" y="115" text-anchor="middle" class="wk-txt-sm">w2</text>
+        <rect x="212" y="126" width="22" height="30" class="wk-c"></rect>
+        <text x="223" y="145" text-anchor="middle" class="wk-txt-sm">w3</text>
+        <rect x="212" y="156" width="22" height="30" class="wk-d"></rect>
+        <text x="223" y="175" text-anchor="middle" class="wk-txt-sm">w4</text>
+        <text x="124" y="204" text-anchor="middle" class="g-note">tile Sᵢⱼ</text>
+        <text x="198" y="132" text-anchor="middle" class="g-op">×</text>
+        <text x="248" y="132" text-anchor="middle" class="g-op">=</text>
+        <text x="313" y="58" text-anchor="middle" class="g-lbl">partial sums of P̃Vⱼ</text>
+        <rect x="262" y="66" width="18" height="120" class="wk-a"></rect>
+        <text x="271" y="82" text-anchor="middle" class="wk-txt-sm">w1</text>
+        <text x="285" y="132" text-anchor="middle" class="g-op">+</text>
+        <rect x="290" y="66" width="18" height="120" class="wk-b"></rect>
+        <text x="299" y="82" text-anchor="middle" class="wk-txt-sm">w2</text>
+        <text x="313" y="132" text-anchor="middle" class="g-op">+</text>
+        <rect x="318" y="66" width="18" height="120" class="wk-c"></rect>
+        <text x="327" y="82" text-anchor="middle" class="wk-txt-sm">w3</text>
+        <text x="341" y="132" text-anchor="middle" class="g-op">+</text>
+        <rect x="346" y="66" width="18" height="120" class="wk-d"></rect>
+        <text x="355" y="82" text-anchor="middle" class="wk-txt-sm">w4</text>
+        <path d="M262,192 L262,198 L364,198 L364,192" class="s-arrow"></path>
+        <text x="313" y="214" text-anchor="middle" class="g-note">added through</text>
+        <text x="313" y="228" text-anchor="middle" class="g-note">shared memory</text>
+        </svg>
+        <p class="duo-note">A warp holds every row, for some keys. Its product with its slice of V<sub>j</sub> is a partial sum for all rows. The warps write the partial sums to shared memory, synchronize, and add them.</p>
+      </div>
+      <div>
+        <p class="duo-title">FA2: Q<sub>i</sub> split across warps</p>
+        <svg viewBox="0 0 380 236" role="img" aria-label="FlashAttention-2: the rows of Q i are divided among warps w1 to w4, and K j and V j are read by all warps. The tile S i j is cut into four row slices. Each warp produces finished rows, and nothing is combined.">
+        <text x="124" y="26" text-anchor="middle" class="g-lbl">Kⱼᵀ</text>
+        <text x="41" y="58" text-anchor="middle" class="g-lbl">Qᵢ</text>
+        <text x="223" y="58" text-anchor="middle" class="g-lbl">Vⱼ</text>
+        <rect x="64" y="36" width="120" height="22" class="wk-all"></rect>
+        <text x="124" y="51" text-anchor="middle" class="g-note">all warps</text>
+        <rect x="30" y="66" width="22" height="30" class="wk-a"></rect>
+        <text x="41" y="85" text-anchor="middle" class="wk-txt-sm">w1</text>
+        <rect x="30" y="96" width="22" height="30" class="wk-b"></rect>
+        <text x="41" y="115" text-anchor="middle" class="wk-txt-sm">w2</text>
+        <rect x="30" y="126" width="22" height="30" class="wk-c"></rect>
+        <text x="41" y="145" text-anchor="middle" class="wk-txt-sm">w3</text>
+        <rect x="30" y="156" width="22" height="30" class="wk-d"></rect>
+        <text x="41" y="175" text-anchor="middle" class="wk-txt-sm">w4</text>
+        <rect x="64" y="66" width="120" height="30" class="wk-a"></rect>
+        <text x="124" y="85" text-anchor="middle" class="wk-txt">w1</text>
+        <rect x="64" y="96" width="120" height="30" class="wk-b"></rect>
+        <text x="124" y="115" text-anchor="middle" class="wk-txt">w2</text>
+        <rect x="64" y="126" width="120" height="30" class="wk-c"></rect>
+        <text x="124" y="145" text-anchor="middle" class="wk-txt">w3</text>
+        <rect x="64" y="156" width="120" height="30" class="wk-d"></rect>
+        <text x="124" y="175" text-anchor="middle" class="wk-txt">w4</text>
+        <rect x="212" y="66" width="22" height="120" class="wk-all"></rect>
+        <text x="223" y="130" text-anchor="middle" class="g-note" transform="rotate(-90 223 126)">all warps</text>
+        <text x="124" y="204" text-anchor="middle" class="g-note">tile Sᵢⱼ</text>
+        <text x="198" y="132" text-anchor="middle" class="g-op">×</text>
+        <text x="248" y="132" text-anchor="middle" class="g-op">=</text>
+        <text x="273" y="58" text-anchor="middle" class="g-lbl">P̃Vⱼ</text>
+        <rect x="262" y="66" width="22" height="30" class="wk-a"></rect>
+        <text x="273" y="85" text-anchor="middle" class="wk-txt-sm">w1</text>
+        <rect x="262" y="96" width="22" height="30" class="wk-b"></rect>
+        <text x="273" y="115" text-anchor="middle" class="wk-txt-sm">w2</text>
+        <rect x="262" y="126" width="22" height="30" class="wk-c"></rect>
+        <text x="273" y="145" text-anchor="middle" class="wk-txt-sm">w3</text>
+        <rect x="262" y="156" width="22" height="30" class="wk-d"></rect>
+        <text x="273" y="175" text-anchor="middle" class="wk-txt-sm">w4</text>
+        <text x="273" y="204" text-anchor="middle" class="g-note">finished rows</text>
+        </svg>
+        <p class="duo-note">A warp holds some rows, for every key. Its product with all of V<sub>j</sub> is the finished contribution for its rows. Nothing is combined across warps.</p>
+      </div>
+    </div>
+    <figcaption>Colors mark the warps w1 to w4. Grey blocks are read by all warps.</figcaption>
+  </figure>
+
+  <ul>
+    <li><strong>FA1</strong> splits \(\mathbf{K}_j\) and \(\mathbf{V}_j\) across the warps and lets every warp read \(\mathbf{Q}_i\). The paper calls this the "split-K" scheme. Each warp ends up with a partial sum, and combining the partial sums costs shared-memory writes, a synchronization and shared-memory reads.</li>
+    <li><strong>FA2</strong> splits \(\mathbf{Q}_i\) across the warps and lets every warp read \(\mathbf{K}_j\) and \(\mathbf{V}_j\). Each warp owns complete rows, so it finishes them alone.</li>
+  </ul>
+  <div class="callout key">
+    <span class="label">Key idea · cut along rows, not keys</span>
+    <p>This is the rule from <a href="#parallel">section 4</a> applied one level down. Softmax and \(\mathbf{P}\mathbf{V}\) both reduce over keys. A cut along keys leaves pieces that must be merged, and a cut along rows leaves pieces that are independent. The FA2 forward pass cuts along rows at both the thread-block level and the warp level.</p>
+  </div>
+  <p>The name "split-K" comes from GEMM kernels, where K is the inner dimension that the product sums over. This is background from outside the paper. For \(\tilde{\mathbf{P}}\mathbf{V}_j\) that inner dimension is the key index.</p>
+  <p><strong>Backward pass.</strong> FA2 also avoids split-K there. Some synchronization between warps remains, because of the dependencies among \(\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathbf{O}, \mathbf{dO}, \mathbf{dQ}, \mathbf{dK}, \mathbf{dV}\). The paper gives no more detail.</p>
+  <p><strong>Block sizes.</strong> FA1 derives block sizes from the SRAM size \(M\): \(B_c = \lceil M/4d \rceil\) and \(B_r = \min(\lceil M/4d \rceil, d)\). FA2's pseudo-code takes block sizes as inputs, and the implementation picks them by hand from \(\{64, 128\} \times \{64, 128\}\), depending on the head dimension and the device's shared-memory size. Larger blocks mean fewer shared-memory loads and stores, but need more registers and more shared memory. Past some size, registers spill and the kernel slows down sharply, or the blocks no longer fit and the kernel cannot run. The paper leaves auto-tuning to future work.</p>
+</section>
+
+<!-- 6 ============================================================ -->
+<section id="backward">
+  <h2>6. Backward pass: the changes in one table</h2>
+  <p>The gradient formulas are FA1's: \(\mathbf{dV} = \mathbf{P}^\top\mathbf{dO}\), \(\mathbf{dP} = \mathbf{dO}\,\mathbf{V}^\top\), \(\mathbf{dS} = \mathbf{P} \circ (\mathbf{dP} - D)\), \(\mathbf{dQ} = \mathbf{dS}\,\mathbf{K}\) and \(\mathbf{dK} = \mathbf{dS}^\top\mathbf{Q}\), with \(D = \operatorname{rowsum}(\mathbf{dO} \circ \mathbf{O})\). The paper calls the backward pass "almost the same" as FA1's.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>FA1 (Algorithm 4)</th><th>FA2 (Algorithm 2)</th></tr></thead>
+      <tbody>
+        <tr><td>Saved by the forward pass</td><td>\(\mathbf{O}\), \(m\), \(\ell\)</td><td>\(\mathbf{O}\), \(L\)</td></tr>
+        <tr><td>Recomputed tile of \(\mathbf{P}\)</td><td>\(\operatorname{diag}(\ell_i)^{-1}\exp(\mathbf{S}_{ij} - m_i)\)</td><td>\(\exp(\mathbf{S}_{ij} - L_i)\)</td></tr>
+        <tr><td>\(D_i\)</td><td>computed inside the inner loop</td><td>computed once before the loops and stored as a length-\(N\) vector</td></tr>
+        <tr><td>Loop order</td><td>K/V blocks outside, Q blocks inside</td><td>the same</td></tr>
+        <tr><td>Unit of parallelism</td><td>(batch, head)</td><td>(batch, head, K/V block)</td></tr>
+        <tr><td>Update of \(\mathbf{dQ}_i\)</td><td>read, add, write by the one worker</td><td>atomic adds from every column worker</td></tr>
+        <tr><td>Warps</td><td>split-K</td><td>not split-K; some synchronization remains</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The two forms of the recomputed tile are equal, because \(\exp(\mathbf{S} - m - \log\ell) = \exp(\mathbf{S} - m)/\ell\). The FA2 form drops a division per entry and one saved vector per head. The earlier \(D_i\) computation shows only in the pseudo-code.</p>
+</section>
+
+<!-- 7 ============================================================ -->
+<section id="causal">
+  <h2>7. Causal masks and shared K/V heads</h2>
+  <p><strong>Causal mask.</strong> A causal mask sets \(S_{ij}\) to \(-\infty\) wherever \(j &gt; i\). FA2 uses the tile grid in two ways:</p>
+  <ol>
+    <li>It skips every tile that lies entirely above the diagonal. For long sequences that is about half the tiles, and attention runs 1.7–1.8× faster than the same attention without the mask.</li>
+    <li>It applies the mask only to tiles that straddle the diagonal. Tiles entirely below the diagonal need no mask. With square tiles, one tile per row block is masked.</li>
+  </ol>
+
+  <figure>
+    <div class="fig-title">Tiles under a causal mask</div>
+    <div class="cm-wrap">
+      <svg viewBox="0 0 290 270" role="img" aria-label="A 5 by 5 grid of tiles under a causal mask. The 10 tiles above the diagonal are skipped, the 5 tiles on the diagonal are computed with the mask, and the 10 tiles below it are computed without a mask.">
+      <text x="170" y="14" text-anchor="middle" class="g-axis">K/V block j</text>
+      <text x="82" y="36" text-anchor="middle" class="g-axis">1</text>
+      <text x="126" y="36" text-anchor="middle" class="g-axis">2</text>
+      <text x="170" y="36" text-anchor="middle" class="g-axis">3</text>
+      <text x="214" y="36" text-anchor="middle" class="g-axis">4</text>
+      <text x="258" y="36" text-anchor="middle" class="g-axis">5</text>
+      <text x="14" y="158" text-anchor="middle" class="g-axis" transform="rotate(-90 14 154)">Q block i</text>
+      <text x="50" y="70" text-anchor="end" class="g-axis">1</text>
+      <text x="50" y="114" text-anchor="end" class="g-axis">2</text>
+      <text x="50" y="158" text-anchor="end" class="g-axis">3</text>
+      <text x="50" y="202" text-anchor="end" class="g-axis">4</text>
+      <text x="50" y="246" text-anchor="end" class="g-axis">5</text>
+      <rect x="62" y="46" width="40" height="40" rx="2" class="ct-mask"></rect>
+      <polygon points="63,47 101,47 101,85" class="ct-tri"></polygon>
+      <line x1="63" y1="47" x2="101" y2="85" class="ct-diag"></line>
+      <rect x="106" y="46" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="150" y="46" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="194" y="46" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="238" y="46" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="62" y="90" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="106" y="90" width="40" height="40" rx="2" class="ct-mask"></rect>
+      <polygon points="107,91 145,91 145,129" class="ct-tri"></polygon>
+      <line x1="107" y1="91" x2="145" y2="129" class="ct-diag"></line>
+      <rect x="150" y="90" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="194" y="90" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="238" y="90" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="62" y="134" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="106" y="134" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="150" y="134" width="40" height="40" rx="2" class="ct-mask"></rect>
+      <polygon points="151,135 189,135 189,173" class="ct-tri"></polygon>
+      <line x1="151" y1="135" x2="189" y2="173" class="ct-diag"></line>
+      <rect x="194" y="134" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="238" y="134" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="62" y="178" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="106" y="178" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="150" y="178" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="194" y="178" width="40" height="40" rx="2" class="ct-mask"></rect>
+      <polygon points="195,179 233,179 233,217" class="ct-tri"></polygon>
+      <line x1="195" y1="179" x2="233" y2="217" class="ct-diag"></line>
+      <rect x="238" y="178" width="40" height="40" rx="3" class="ct-skip"></rect>
+      <rect x="62" y="222" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="106" y="222" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="150" y="222" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="194" y="222" width="40" height="40" rx="3" class="ct-full"></rect>
+      <rect x="238" y="222" width="40" height="40" rx="2" class="ct-mask"></rect>
+      <polygon points="239,223 277,223 277,261" class="ct-tri"></polygon>
+      <line x1="239" y1="223" x2="277" y2="261" class="ct-diag"></line>
+      </svg>
+      <div class="legend">
+        <span><i class="lg-skip"></i>Entirely above the diagonal: skipped</span>
+        <span><i class="lg-mask"></i>Straddles the diagonal: computed with the mask. The shaded half is masked.</span>
+        <span><i class="lg-full"></i>Entirely below the diagonal: computed, no mask needed</span>
+      </div>
+    </div>
+    <figcaption>Rows are Q blocks and columns are K/V blocks, with square tiles.</figcaption>
+  </figure>
+
+  <p>FA1's exact-attention pseudo-code applies the mask function to every tile. FA1 skips tiles only in its block-sparse variant, which is approximate. FA2 applies the same skip to the causal mask, where the result stays exact.</p>
+  <p><strong>Multi-query and grouped-query attention (MQA, GQA).</strong> In these variants several query heads attend to one shared key/value head, which shrinks the KV cache at inference. FA2 indexes into the shared head instead of duplicating \(\mathbf{K}\) and \(\mathbf{V}\). In the backward pass it sums \(\mathbf{dK}\) and \(\mathbf{dV}\) over the query heads that share them.</p>
+</section>
+
+<!-- 8 ============================================================ -->
+<section id="same">
+  <h2>8. What did not change</h2>
+  <ul>
+    <li>The output is exact attention, identical to FA1's.</li>
+    <li>The cost is \(O(N^2 d)\) FLOPs and \(O(N)\) extra memory. The extra memory is now one vector \(L\) per head instead of two.</li>
+    <li>The forward pass still tiles the computation and merges tiles with online softmax, inside one fused kernel.</li>
+    <li>The backward pass still recomputes \(\mathbf{S}\) and \(\mathbf{P}\) one tile at a time and uses \(D_i = \mathbf{do}_i^\top \mathbf{o}_i\).</li>
+    <li>Within one row, the forward pass still processes K/V blocks in sequence.</li>
+  </ul>
+  <p>FA2 does not revisit FA1's IO-complexity theorems or its block-sparse attention. FA2's pseudo-code also leaves out the scaling, general masking and dropout that FA1's full algorithms include.</p>
+</section>
+
+<!-- 9 ============================================================ -->
+<section id="results">
+  <h2>9. Results</h2>
+  <p><strong>Attention alone</strong>, on an A100 80GB. Sequence length runs from 512 to 16k, with the batch size set so that the total is 16k tokens. Hidden dimension is 2048 and head dimension is 64 or 128, with and without a causal mask.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>FA2 compared with</th><th>Speedup</th></tr></thead>
+      <tbody>
+        <tr><td>FA1, and the xformers implementation of FA1</td><td>about 2× (1.7–3.0× across settings)</td></tr>
+        <tr><td>FA1 implemented in Triton</td><td>1.3–1.5× forward, about 2× backward</td></tr>
+        <tr><td>Standard attention in PyTorch</td><td>3–10×</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li>FA2 peaks at 230 TFLOPs/s in the forward pass, which is 73% of the A100's 312. The backward pass reaches up to 63%.</li>
+    <li>The same code on an H100, without H100-specific instructions, reaches up to 335 TFLOPs/s.</li>
+    <li>The percentages count forward FLOPs as \(4 \cdot N^2 \cdot d \cdot \text{heads}\), halved under a causal mask, and backward FLOPs as 2.5× the forward count. The backward pass has 5 matmuls per tile where the forward pass has 2.</li>
+  </ul>
+  <p><strong>End-to-end training</strong> of GPT-style models on 8× A100 80GB, in TFLOPs/s per GPU:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Model</th><th class="num">No FlashAttention</th><th class="num">FA1</th><th class="num">FA2</th><th class="num">FA2 ÷ FA1</th></tr></thead>
+      <tbody>
+        <tr><td>1.3B parameters, 2k context</td><td class="num">142</td><td class="num">189</td><td class="num">196</td><td class="num">1.04</td></tr>
+        <tr><td>1.3B parameters, 8k context</td><td class="num">72</td><td class="num">170</td><td class="num">220</td><td class="num">1.29</td></tr>
+        <tr><td>2.7B parameters, 2k context</td><td class="num">149</td><td class="num">189</td><td class="num">205</td><td class="num">1.08</td></tr>
+        <tr><td>2.7B parameters, 8k context</td><td class="num">80</td><td class="num">175</td><td class="num">225</td><td class="num">1.29</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The best figure, 225 TFLOPs/s, is 72% model FLOPs utilization. The last column is my arithmetic. The gain over FA1 is concentrated at 8k context. Two things point that way: by the paper's FLOP formula, attention is a larger share of the work at longer context, and the paper says sequence-length parallelism helps most when sequences are long and batches are small.</p>
+  <p>The paper has no ablation, so it does not say how much of the 2× each of the three changes contributes.</p>
+</section>
+
+<!-- 10 =========================================================== -->
+<section id="typos">
+  <h2>10. Typos in the FA2 paper (v1)</h2>
+  <p>Four places in the paper read differently from what the algorithm does:</p>
+  <ol>
+    <li><strong>Algorithm 1, line 10</strong> prints the factor on the old accumulator as \(\operatorname{diag}(e^{m^{(j-1)} - m^{(j)}})^{-1}\). The inverse should not be there. The factor is at most 1 and scales the old terms down to the new max, as in <a href="#update">section 3</a> above. In a numerical check on random inputs, the form without the inverse matched naive attention to 1e-15, and the printed form was off by more than 1e5. The two-block examples in §2.3.1 and §3.1.1 carry the same stray inverse.</li>
+    <li><strong>§3.1.1, causal masking, item 2</strong> says no mask is needed for blocks "whose row indices are guaranteed to be strictly less than the column indices". Those are the fully masked blocks. The blocks that need no mask are the ones whose column indices are no greater than their row indices.</li>
+    <li><strong>Algorithm 2, line 4</strong> gives \(D \in \mathbb{R}^d\). \(D\) has one entry per row, so \(D \in \mathbb{R}^N\).</li>
+    <li><strong>§4.2</strong> says FA2 yields a 1.3× speedup "compared to FlashAttention-2". It means compared to FlashAttention.</li>
+  </ol>
+</section>
+
+<footer>
+  Based on Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, Christopher Ré, “FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness,” NeurIPS 2022 (<a href="https://arxiv.org/abs/2205.14135">arXiv:2205.14135</a>), and Tri Dao, “FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning,” 2023 (<a href="https://arxiv.org/abs/2307.08691">arXiv:2307.08691</a>). Figures on this page are drawn for explanation; hardware and benchmark numbers are quoted from the papers.
+</footer>
+
+</main>
+
+</div>
+
+<script>
+(function () {
+  /* ---------- TOC: collapsible subsections ---------- */
+  const toc = document.querySelector('.toc');
+  const subLis = [...toc.querySelectorAll(':scope > ol > li')].filter(li => li.querySelector(':scope > ol.sub'));
+  const pinned = new Set();
+  function setOpen(li, open) {
+    li.classList.toggle('open', open);
+    li.querySelector(':scope > .toc-tog').setAttribute('aria-expanded', String(open));
+  }
+  subLis.forEach((li, n) => {
+    li.classList.add('has-sub');
+    const sub = li.querySelector(':scope > ol.sub');
+    sub.id = 'toc-sub-' + n;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toc-tog';
+    btn.setAttribute('aria-controls', sub.id);
+    btn.setAttribute('aria-label', 'Show subsections of ' + li.querySelector(':scope > a').textContent);
+    li.insertBefore(btn, sub);
+    btn.addEventListener('click', () => {
+      const open = !li.classList.contains('open');
+      setOpen(li, open);
+      if (open) pinned.add(li); else pinned.delete(li);
+    });
+    setOpen(li, false);
+  });
+  toc.classList.add('collapsible');
+  function followSection(a) {
+    subLis.forEach(li => {
+      const mine = li.querySelector(':scope > a') === a;
+      if (mine) setOpen(li, true);
+      else if (!pinned.has(li)) setOpen(li, false);
+    });
+  }
+
+  /* ---------- TOC highlight ---------- */
+  const links = [...document.querySelectorAll('.toc > ol > li > a')];
+  const byId = Object.fromEntries(links.map(a => [a.getAttribute('href').slice(1), a]));
+  if ('IntersectionObserver' in window) {
+    const obs = new IntersectionObserver(entries => {
+      entries.forEach(en => {
+        if (en.isIntersecting) {
+          links.forEach(a => a.classList.remove('active'));
+          const a = byId[en.target.id];
+          if (a) { a.classList.add('active'); followSection(a); }
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    document.querySelectorAll('main section').forEach(s => obs.observe(s));
+  }
+
+  /* ---------- copy button ---------- */
+  document.querySelectorAll('.copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pre = document.getElementById(btn.dataset.target);
+      const text = pre.innerText;
+      const done = () => { btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1600); };
+      const fallback = () => {
+        const r = document.createRange(); r.selectNodeContents(pre);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        btn.textContent = 'Selected, press Ctrl+C';
+      };
+      try {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } catch (e) { fallback(); }
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
